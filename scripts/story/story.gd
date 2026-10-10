@@ -292,9 +292,10 @@ func _chaos() -> void:
 			for i in plane.windows.size():
 				if not plane.windows[i].broken:
 					intact.append(i)
-			world.break_window(intact.pick_random())
-			world.shake_all(0.4)
-			world.say("", BIRD.pick_random(), 3.5)
+			if not intact.is_empty():
+				world.break_window(intact.pick_random())
+				world.shake_all(0.4)
+				world.say("", BIRD.pick_random(), 3.5)
 		"fire":
 			var i := 0 if not plane.engine_fire[0] else 1
 			if not plane.engine_fire[0] and not plane.engine_fire[1]:
@@ -322,8 +323,15 @@ func _chaos() -> void:
 			world.set_plane("ramp", true)
 			world.say("ATTENDANT", "The cargo ramp just opened BY ITSELF! Someone close the ramp! Lever's in the back!", 4.0)
 		"trolley":
-			var cart := world.spawn_object("cart", Transform3D(plane.global_basis, plane.to_global(Vector3(0, 0.4, -9.3))),
-				{}) as RigidBody3D
+			var cart: RigidBody3D = null
+			for id in world.objects:
+				var o: Node3D = world.objects[id]
+				if o.get_meta("kind", "") == "cart":
+					cart = o as RigidBody3D
+					break
+			if cart == null:
+				cart = world.spawn_object("cart", Transform3D(plane.global_basis, plane.to_global(Vector3(0, 0.4, -9.3))),
+					{}) as RigidBody3D
 			if cart:
 				cart.linear_velocity = plane.global_basis * Vector3(0, 0, 7.0)
 			world.say("ATTENDANT", "The drinks trolley has ESCAPED! It's coming down the aisle! Protect your knees!", 3.5)
