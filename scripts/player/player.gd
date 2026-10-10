@@ -11,22 +11,29 @@ const SPRINT_SPEED := 7.5
 const CROUCH_SPEED := 2.0
 const JUMP_VELOCITY := 4.8
 const ACCEL := 40.0
-const AIR_ACCEL := 6.0
+const AIR_ACCEL := 12.0      ## Slightly floatier air control
 const MOUSE_SENS := 0.0025
 const REACH := 3.0
 const HOLD_DIST := 1.4
 const SLIDE := 0.7            ## Share of downhill gravity that slides you on a tilted floor.
-const FLOOR_FRICTION := 2.5
-const BRACE_FRICTION := 7.0
+const FLOOR_FRICTION := 3.5   ## Crisper decel
+const BRACE_FRICTION := 9.0
 const WIND_ACCEL := 9.0       ## Outside, at cruise speed.
 const FELL_DISTANCE := 70.0
 const RESPAWN_TIME := 3.0
 const STATE_INTERVAL := 1.0 / 30.0
 const PUNCH_COOLDOWN := 0.35
 const EYE_HEIGHT := 1.6
+const CROUCH_EYE := 1.1       ## Crouch eye height (smoothly lerped)
 const SEATED_EYE := 1.15
-const HAND_REST := Vector3(0.22, -0.26, -0.52)   ## Right arm rest pose in camera space.
-const PILOT_EYE := 1.5      ## High enough to see over the dashboard.
+const PILOT_EYE := 1.5        ## High enough to see over the dashboard.
+const COYOTE_TIME := 0.12
+const JUMP_BUFFER := 0.12
+const STEP_HEIGHT := 0.3      ## Step up small ledges
+const LAND_DIP_SPEED := 8.0   ## Camera dip speed on landing
+const MAX_DIP := 0.15         ## Max camera dip (meters)
+
+const PlayerLook := preload("res://scripts/player/player_look.gd")
 
 const COLORS := [Color(0.95, 0.35, 0.3), Color(0.3, 0.6, 0.95), Color(0.35, 0.85, 0.4),
 	Color(0.95, 0.8, 0.25), Color(0.75, 0.4, 0.9), Color(0.95, 0.55, 0.2), Color(0.3, 0.85, 0.85),
@@ -51,9 +58,11 @@ var piloting := false:
 			rotation.y = 0.0
 			look_pitch = 0.0
 			head.rotation.x = 0.0
+			_set_camera_mode(true)
 		else:
 			global_position = world.plane.to_global(Airliner.PILOT_SEAT + Vector3(0.6, -0.4, 0.4))
 			_shape.set_deferred("disabled", false)
+			_set_camera_mode(false)
 
 var seated := false
 var seat_local := Vector3.ZERO
@@ -68,25 +77,47 @@ var head: Node3D
 var camera: Camera3D
 var ray: RayCast3D
 var _shape: CollisionShape3D
-var _hands: Node3D
-var _hand_l: MeshInstance3D
-var _hand_r: MeshInstance3D
-var _body_vis: Node3D
-var _legs: Node3D
-var _arms_vis: Node3D
-var _label: Label3D
+var _capsule: CapsuleShape3D
+
+# First-person arms
+var _fp_parts: Dictionary
+var _hands_parent: Node3D
+
+# Third-person body (for local player in 3rd person, and all remote players)
+var _tp_parts: Dictionary
+var _third_person := false
+var _cam_boom: Node3D
+var _cam_target: Node3D
+var _tp_camera: Camera3D
+
+# Movement state
 var _move_vel := Vector3.ZERO
 var _state_t := 0.0
 var _bob_t := 0.0
 var _punch_t := 0.0
 var _respawn_t := 0.0
 var _trauma := 0.0
+var _coyote_t := 0.0
+var _jump_buffer_t := 0.0
+var _was_on_floor := false
+var _land_dip := 0.0
+var _prev_vy := 0.0
+
+# Remote
 var _remote_pos := Vector3.ZERO
 var _remote_yaw := 0.0
 var _remote_pitch := 0.0
 var _remote_flags := 0
 var _has_remote := false
 var _aim := {}               ## {type, ...} what the ray hits
+
+# Settings
+var _mouse_sens_mult := 1.0
+var _invert_y := false
+var _fov := 80.0
+
+# Ping
+var _ping_cooldown := 0.0
 
 
 func _ready() -> void:
@@ -95,172 +126,199 @@ func _ready() -> void:
 	# collide with the player's layer, so the moving capsule shoves them out of the way.
 	collision_mask = Layers.WORLD | Layers.PLAYER | Layers.NPC
 	floor_max_angle = deg_to_rad(55)
-	floor_snap_length = 0.3
+	floor_snap_length = STEP_HEIGHT  # Step up small ledges
 	_shape = CollisionShape3D.new()
-	var cap := CapsuleShape3D.new()
-	cap.radius = 0.32
-	cap.height = 1.7
-	_shape.shape = cap
+	_capsule = CapsuleShape3D.new()
+	_capsule.radius = 0.32
+	_capsule.height = 1.7
+	_shape.shape = _capsule
 	_shape.position.y = 0.85
 	add_child(_shape)
+	
 	head = Node3D.new()
 	head.position.y = EYE_HEIGHT
 	add_child(head)
+	
 	var color: Color = COLORS[peer_id % COLORS.size()]
+	var skin := Color(0.96, 0.8, 0.65)
+	var hair: Color = [Color(0.25, 0.15, 0.08), Color(0.95, 0.8, 0.35), Color(0.1, 0.1, 0.1), Color(0.75, 0.3, 0.15)][peer_id % 4]
+	
 	if is_local:
+		# First-person camera
 		camera = Camera3D.new()
-		camera.fov = 80
+		camera.fov = _fov
 		camera.far = 30000.0
 		camera.near = 0.05
 		head.add_child(camera)
 		camera.current = true
+		
 		ray = RayCast3D.new()
 		ray.target_position = Vector3(0, 0, -REACH)
 		ray.collision_mask = Layers.WORLD | Layers.PLAYER | Layers.PROP | Layers.NPC | Layers.INTERACT
 		ray.collide_with_areas = true
 		ray.add_exception(self)
 		camera.add_child(ray)
-		_build_hands(color)
+		
+		# Build FP arms with sleeves and proper hands
+		_fp_parts = PlayerLook.build_fp_arms(color, skin, camera)
+		_hands_parent = _fp_parts.shoulder_l.get_parent()
+		
+		# Third-person camera boom (initially disabled)
+		_cam_boom = Node3D.new()
+		_cam_boom.position = Vector3(0, 1.5, 0)  # Above head
+		head.add_child(_cam_boom)
+		
+		_cam_target = Node3D.new()
+		_cam_target.position = Vector3(0, 0, 2.5)  # Behind
+		_cam_boom.add_child(_cam_target)
+		
+		_tp_camera = Camera3D.new()
+		_tp_camera.fov = _fov
+		_tp_camera.far = 30000.0
+		_tp_camera.near = 0.05
+		_tp_camera.current = false
+		_cam_target.add_child(_tp_camera)
+		
+		# Build TP body for local player (hidden in 1st person)
+		_tp_parts = PlayerLook.build_tp_body(color, skin, hair, display_name, self)
+		_tp_parts.body_vis.visible = false
+		_tp_parts.label.visible = false
+		# Set initial seated pose
+		_tp_parts.legs.rotation.x = PI / 2
+		_tp_parts.body_vis.position.y = -0.35
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+		
+		# Settings
+		_mouse_sens_mult = Settings.mouse_sensitivity
+		_invert_y = Settings.invert_y
+		_fov = Settings.fov
+		Settings.changed.connect(_on_settings_changed)
 	else:
-		_build_body(color)
+		_tp_parts = PlayerLook.build_tp_body(color, skin, hair, display_name, self)
+		# Initially seated
+		_tp_parts.legs.rotation.x = PI / 2
+		_tp_parts.body_vis.position.y = -0.35
 
 
-# --- Visuals ---------------------------------------------------------------------------
-
-## Adds a primitive mesh part with its own colour.
-func _part(mesh: PrimitiveMesh, pos: Vector3, color: Color, parent: Node3D, rot := Vector3.ZERO,
-		scl := Vector3.ONE) -> MeshInstance3D:
-	var m := StandardMaterial3D.new()
-	m.albedo_color = color
-	m.roughness = 0.7
-	mesh.material = m
-	var mi := MeshInstance3D.new()
-	mi.mesh = mesh
-	mi.position = pos
-	mi.rotation = rot
-	mi.scale = scl
-	parent.add_child(mi)
-	return mi
+func _on_settings_changed() -> void:
+	if not is_local:
+		return
+	_mouse_sens_mult = Settings.mouse_sensitivity
+	_invert_y = Settings.invert_y
+	_fov = Settings.fov
+	if camera:
+		camera.fov = _fov
+	if _tp_camera:
+		_tp_camera.fov = _fov
 
 
-static func _capsule(radius: float, height: float) -> CapsuleMesh:
-	var c := CapsuleMesh.new()
-	c.radius = radius
-	c.height = height
-	c.radial_segments = 16
-	c.rings = 4
-	return c
+func _set_camera_mode(first_person: bool) -> void:
+	if not is_local:
+		return
+	_third_person = not first_person
+	camera.current = first_person
+	if _tp_camera:
+		_tp_camera.current = not first_person
+	# Show/hide FP hands and TP body
+	if _hands_parent:
+		_hands_parent.visible = first_person
+	if _tp_parts and _tp_parts.body_vis:
+		_tp_parts.body_vis.visible = not first_person
+	if _tp_parts and _tp_parts.label:
+		_tp_parts.label.visible = not first_person
+	# Ray always from active camera
+	if ray:
+		ray.set_parent(camera if first_person else _tp_camera)
+	ray.add_exception(self)
 
 
-static func _ball(radius: float) -> SphereMesh:
-	var s := SphereMesh.new()
-	s.radius = radius
-	s.height = radius * 2.0
-	s.radial_segments = 16
-	s.rings = 8
-	return s
-
-
-func _build_hands(color: Color) -> void:
-	_hands = Node3D.new()
-	camera.add_child(_hands)
-	var skin := Color(0.96, 0.8, 0.65)
-	_hand_l = _part(_capsule(0.03, 0.24), Vector3(-HAND_REST.x, HAND_REST.y, HAND_REST.z), color, _hands, Vector3(-PI / 2, 0, 0))
-	_hand_r = _part(_capsule(0.03, 0.24), HAND_REST, color, _hands, Vector3(-PI / 2, 0, 0))
-	for h in [_hand_l, _hand_r]:
-		_part(_ball(0.038), Vector3(0, 0.135, 0), skin, h)          # Fist (capsule's +Y points forward).
-		_part(_capsule(0.035, 0.07), Vector3(0, 0.06, 0), Color.WHITE, h)   # Cuff.
-		h.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-
-
-func _build_body(color: Color) -> void:
-	var skin := Color(0.96, 0.8, 0.65).darkened(float(peer_id % 4) * 0.12)
-	var hair: Color = [Color(0.25, 0.15, 0.08), Color(0.95, 0.8, 0.35), Color(0.1, 0.1, 0.1), Color(0.75, 0.3, 0.15)][peer_id % 4]
-	var pants := Color(0.2, 0.22, 0.32)
-	_body_vis = Node3D.new()
-	add_child(_body_vis)
-	_part(_capsule(0.27, 0.78), Vector3(0, 1.15, 0), color, _body_vis, Vector3.ZERO, Vector3(1, 1, 0.75))
-	_part(_capsule(0.06, 0.3), Vector3(0, 1.3, -0.2), color.darkened(0.25), _body_vis)   # Zip line.
-	var head := Node3D.new()
-	head.position = Vector3(0, 1.72, 0)
-	_body_vis.add_child(head)
-	_part(_ball(0.21), Vector3.ZERO, skin, head)
-	_part(_ball(0.22), Vector3(0, 0.07, 0.03), hair, head, Vector3.ZERO, Vector3(1, 0.75, 1))
-	for ex in [-0.075, 0.075]:
-		_part(_ball(0.045), Vector3(ex, 0.02, -0.18), Color.WHITE, head)
-		_part(_ball(0.022), Vector3(ex, 0.02, -0.215), Color(0.08, 0.08, 0.1), head)
-	_part(_capsule(0.018, 0.1), Vector3(0, -0.09, -0.19), Color(0.5, 0.15, 0.15), head, Vector3(0, 0, PI / 2))
-	_part(_ball(0.03), Vector3(0, -0.02, -0.21), skin.darkened(0.1), head)   # Nose.
-	_legs = Node3D.new()
-	_legs.position.y = 0.82
-	_body_vis.add_child(_legs)
-	for lx in [-0.13, 0.13]:
-		_part(_capsule(0.1, 0.8), Vector3(lx, -0.4, 0), pants, _legs)
-		_part(_capsule(0.08, 0.26), Vector3(lx, -0.78, -0.06), Color(0.15, 0.12, 0.1), _legs, Vector3(PI / 2, 0, 0))
-	_arms_vis = Node3D.new()
-	_arms_vis.position.y = 1.42
-	_body_vis.add_child(_arms_vis)
-	for ax in [-0.36, 0.36]:
-		_part(_capsule(0.075, 0.62), Vector3(ax, -0.25, 0), color, _arms_vis)
-		_part(_ball(0.07), Vector3(ax, -0.57, 0), skin, _arms_vis)
-	_label = Label3D.new()
-	_label.text = display_name
-	_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	_label.position.y = 2.2
-	_label.font_size = 48
-	_label.outline_size = 10
-	_label.pixel_size = 0.004
-	add_child(_label)
-
-
-# --- Local control -----------------------------------------------------------------------
-
+# --- Input -------------------------------------------------------------------------------
+	var target_eye = EYE_HEIGHT - (0.5 if crouching else 0.0)
 func _unhandled_input(event: InputEvent) -> void:
 	if not is_local or world.input_blocked() or respawning:
 		return
+	
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		rotate_y(-event.relative.x * MOUSE_SENS)
-		look_pitch = clampf(look_pitch - event.relative.y * MOUSE_SENS, -1.5, 1.5)
+		var sens = MOUSE_SENS * _mouse_sens_mult
+		rotate_y(-event.relative.x * sens)
+		var pitch_delta = event.relative.y * sens * (1.0 if _invert_y else -1.0)
+		look_pitch = clampf(look_pitch + pitch_delta, -1.5, 1.5)
 		head.rotation.x = look_pitch
+		# In third person, rotate the boom yaw with the player, pitch with look
+		if _third_person and _cam_boom:
+			_cam_boom.rotation.y = rotation.y
+			_cam_boom.rotation.x = look_pitch
+	
 	elif event.is_action_pressed("interact"):
 		_on_interact()
 	elif event.is_action_pressed("throw"):
 		_on_primary()
 	elif event.is_action_pressed("use"):
 		if held_id:
-			world.request("use_item", [held_id, camera.global_position, -camera.global_basis.z])
+			var cam = _tp_camera if _third_person else camera
+			world.request("use_item", [held_id, cam.global_position, -cam.global_basis.z])
 	elif event.is_action_pressed("shout"):
 		world.request("shout")
 	elif event.is_action_pressed("gear") and piloting:
 		world.request("gear")
 	elif event.is_action_pressed("flaps") and piloting:
 		world.request("flaps")
+	elif event.is_action_pressed("camera"):
+		_set_camera_mode(!_third_person)
+	elif event.is_action_pressed("ping"):
+		_try_ping()
+	elif event.is_action_just_pressed("jump"):
+		_jump_buffer_t = JUMP_BUFFER
 
+
+func _try_ping() -> void:
+	if _ping_cooldown > 0.0:
+		return
+	var cam = _tp_camera if _third_person else camera
+	if not cam:
+		return
+	var origin = cam.global_position
+	var dir = -cam.global_basis.z
+	world.request("ping", [origin, dir])
+	_ping_cooldown = 0.5
+
+
+# --- Physics -----------------------------------------------------------------------------
 
 func _physics_process(dt: float) -> void:
 	if not is_local:
 		_remote_update(dt)
 		return
+	
 	_trauma = maxf(0.0, _trauma - dt * 1.5)
+	_ping_cooldown = maxf(0.0, _ping_cooldown - dt)
+	
 	if respawning:
 		_respawn_t -= dt
 		if _respawn_t <= 0.0:
 			_finish_respawn()
 		return
+	
 	if piloting or seated:
 		_stick_to_seat(dt)
 	else:
 		_move(dt)
-	hold_point = camera.global_position - camera.global_basis.z * HOLD_DIST
+	
+	# Update hold point from active camera
+	var cam = _tp_camera if _third_person else camera
+	hold_point = cam.global_position - cam.global_basis.z * HOLD_DIST
+	
 	_update_aim()
-	_animate_hands(dt)
+	_animate_local(dt)
+	_update_camera_boom(dt)
+	
 	_state_t += dt
 	if _state_t >= STATE_INTERVAL:
 		_state_t = 0.0
 		world.send_player_state([global_position, rotation.y, look_pitch, hold_point, _flags()])
 		if piloting:
 			_send_pilot_input()
+	
 	# Airborne: drifting away means you fell out. On the ground you may walk off freely.
 	if (world.plane.airborne and global_position.length() > FELL_DISTANCE) or global_position.y < -60.0:
 		_start_respawn()
@@ -270,41 +328,148 @@ func _move(dt: float) -> void:
 	var plane := world.plane
 	var blocked := world.input_blocked()
 	var input := Vector2.ZERO if blocked else Input.get_vector("move_left", "move_right", "move_forward", "move_back")
-	crouching = not blocked and Input.is_action_pressed("crouch")
+	
+	# Crouch input
+	var crouch_pressed := not blocked and Input.is_action_pressed("crouch")
+	
+	# Coyote time and jump buffer
+	var on_floor := is_on_floor()
+	if on_floor:
+		_coyote_t = COYOTE_TIME
+	else:
+		_coyote_t = maxf(0.0, _coyote_t - dt)
+	
+	_jump_buffer_t = maxf(0.0, _jump_buffer_t - dt)
+	
+	# Detect landing for camera dip
+	if on_floor and not _was_on_floor:
+		var fall_speed = -_prev_vy
+		if fall_speed > 5.0:
+			_land_dip = minf(fall_speed * 0.02, MAX_DIP)
+	
+	# Smooth camera dip
+	if _land_dip > 0.0:
+		_land_dip = maxf(0.0, _land_dip - dt * LAND_DIP_SPEED)
+		head.position.y -= _land_dip
+	
+	crouching = crouch_pressed
 	var speed := CROUCH_SPEED if crouching else (SPRINT_SPEED if Input.is_action_pressed("sprint") else WALK_SPEED)
 	var want := (global_basis * Vector3(input.x, 0, input.y)).normalized() * speed
-	var on_floor := is_on_floor()
-	_move_vel = _move_vel.move_toward(want, (ACCEL if on_floor else AIR_ACCEL) * dt)
-
+	
+	# Ground accel/decel
+	var accel = ACCEL if on_floor else AIR_ACCEL
+	_move_vel = _move_vel.move_toward(want, accel * dt)
+	
 	var g := get_gravity()
 	outside = plane.is_outside(global_position + Vector3(0, 1.0, 0))
 	var brace := 0.25 if crouching else 1.0
+	
+	# Suction toward hull breach
 	ext_vel += plane.get_suction(global_position + Vector3(0, 1.0, 0)) * brace * dt
+	
+	# Wind outside
 	if outside and plane.airborne:
 		var wind_scale := clampf(world.flight.speed / 70.0, 0.0, 1.5)
 		ext_vel += plane.global_basis.z * WIND_ACCEL * wind_scale * (0.1 if crouching else 1.0) * dt
+	
 	if on_floor:
+		# Slide down tilted floor
 		var n := get_floor_normal()
 		ext_vel += (g - n * g.dot(n)) * SLIDE * brace * dt
-		ext_vel = ext_vel.move_toward(Vector3.ZERO, (BRACE_FRICTION if crouching else FLOOR_FRICTION) * dt)
+		# Friction
+		var friction = BRACE_FRICTION if crouching else FLOOR_FRICTION
+		ext_vel = ext_vel.move_toward(Vector3.ZERO, friction * dt)
 	else:
 		ext_vel *= 1.0 - 0.3 * dt
+	
+	# Jump with coyote time and buffer
 	var vy := velocity.y + g.y * dt
 	if on_floor and vy < 0.0:
 		vy = maxf(vy, -1.0)
-	if on_floor and not blocked and Input.is_action_just_pressed("jump"):
+	
+	var can_jump := (_coyote_t > 0.0 or on_floor) and _jump_buffer_t > 0.0 and not blocked
+	if can_jump:
 		vy = JUMP_VELOCITY * clampf(world.flight.felt_gravity(), 0.5, 1.5)
+		_coyote_t = 0.0
+		_jump_buffer_t = 0.0
+	
 	velocity = Vector3(_move_vel.x + ext_vel.x, vy + ext_vel.y, _move_vel.z + ext_vel.z)
 	move_and_slide()
+	
 	if is_on_wall():
 		ext_vel = ext_vel.slide(get_wall_normal())
+	
 	if is_on_floor() and ext_vel.y < 0.0:
 		ext_vel.y = 0.0
 	velocity.y -= ext_vel.y
-	head.position.y = move_toward(head.position.y, EYE_HEIGHT - (0.5 if crouching else 0.0), dt * 4.0)
+	
+	# Smooth crouch height change
+	var target_eye = EYE_HEIGHT - (0.5 if crouching else 0.0)
+	var target_height = 1.7 - (0.5 if crouching else 0.0)
+	var target_shape_y = 0.85 - (0.25 if crouching else 0.0)
+	
+	head.position.y = move_toward(head.position.y + _land_dip, target_eye, dt * 8.0)
+	_capsule.height = lerpf(_capsule.height, target_height, dt * 10.0)
+	_shape.position.y = lerpf(_shape.position.y, target_shape_y, dt * 10.0)
+	
+	_was_on_floor = on_floor
+	_prev_vy = velocity.y
 
 
-## Sit in a passenger seat (plane-local point at cushion height).
+func _animate_local(dt: float) -> void:
+	# Animate FP arms
+	if _hands_parent and _hands_parent.visible:
+		var hv = Vector2(velocity.x, velocity.z).length()
+		_bob_t = PlayerLook.animate_fp_arms(_fp_parts, hv, dt, held_id != 0, piloting, _punch_t, _bob_t, _trauma)
+		_punch_t = maxf(0.0, _punch_t - dt)
+	
+	# Animate TP body (for local player in 3rd person)
+	if _third_person and _tp_parts:
+		var hv = Vector2(velocity.x, velocity.z).length()
+		PlayerLook.animate_tp_body(_tp_parts, hv, dt, crouching, seated, piloting, held_id != 0, 1.0)
+	
+	# Camera shake
+	var t := _trauma * _trauma
+	var cam = _tp_camera if _third_person else camera
+	if cam and t > 0.01:
+		cam.h_offset = randf_range(-1, 1) * 0.08 * t
+		cam.v_offset = randf_range(-1, 1) * 0.08 * t
+		cam.rotation.z = randf_range(-1, 1) * 0.05 * t
+
+
+func _update_camera_boom(dt: float) -> void:
+	if not _third_person or not _cam_boom or not _tp_camera:
+		return
+	
+	# Desired boom length
+	var target_dist = 3.0
+	var target_height = 1.5
+	
+	# Raycast from head to camera target to avoid clipping through hull
+	var space = get_world_3d().direct_space_state
+	var from = head.global_position
+	var to = _cam_target.global_position
+	var query = PhysicsRayQueryParameters3D.create(from, to)
+	query.collision_mask = Layers.WORLD
+	query.exclude = [self.get_rid(), world.plane.get_rid()] if world.plane else [self.get_rid()]
+	var result = space.intersect_ray(query)
+	
+	if result:
+		# Hit something, pull camera in
+		var hit_dist = (result.position - from).length()
+		target_dist = min(target_dist, hit_dist - 0.1)
+	
+	# Smooth boom length
+	_cam_target.position = _cam_target.position.lerp(Vector3(0, 0, target_dist), dt * 10.0)
+	_cam_boom.position = _cam_boom.position.lerp(Vector3(0, target_height, 0), dt * 8.0)
+	
+	# Smooth boom rotation to follow player yaw and look pitch
+	_cam_boom.rotation.y = lerp_angle(_cam_boom.rotation.y, rotation.y, dt * 15.0)
+	_cam_boom.rotation.x = lerpf(_cam_boom.rotation.x, look_pitch, dt * 15.0)
+
+
+# --- Seating -----------------------------------------------------------------------------
+
 func sit(seat: Vector3) -> void:
 	seated = true
 	seat_local = seat
@@ -312,6 +477,9 @@ func sit(seat: Vector3) -> void:
 	rotation.y = 0.0
 	ext_vel = Vector3.ZERO
 	_move_vel = Vector3.ZERO
+	if _tp_parts:
+		_tp_parts.legs.rotation.x = PI / 2
+		_tp_parts.body_vis.position.y = -0.35
 
 
 func stand() -> void:
@@ -319,6 +487,9 @@ func stand() -> void:
 		global_position = world.plane.to_global(seat_local + Vector3(0, 0.05, 0))
 	seated = false
 	_shape.set_deferred("disabled", false)
+	if _tp_parts:
+		_tp_parts.legs.rotation.x = 0.0
+		_tp_parts.body_vis.position.y = 0.0
 
 
 func _stick_to_seat(dt: float) -> void:
@@ -326,7 +497,8 @@ func _stick_to_seat(dt: float) -> void:
 	_shape.disabled = true
 	global_position = world.plane.to_global(local - Vector3(0, 0.45, 0))
 	velocity = Vector3.ZERO
-	head.position.y = move_toward(head.position.y, PILOT_EYE if piloting else SEATED_EYE, dt * 4.0)
+	var target_eye = PILOT_EYE if piloting else SEATED_EYE
+	head.position.y = move_toward(head.position.y, target_eye, dt * 4.0)
 	if seated and not piloting and not world.input_blocked():
 		if Input.is_action_just_pressed("jump") or Input.get_vector("move_left", "move_right", "move_forward", "move_back") != Vector2.ZERO:
 			stand()
@@ -336,12 +508,10 @@ func _send_pilot_input() -> void:
 	if world.input_blocked():
 		world.send_pilot_input(0, 0, 0)
 		return
-	# Yoke style: W pushes the nose down, S pulls it up.
 	world.send_pilot_input(Input.get_axis("move_forward", "move_back"),
 		Input.get_axis("move_left", "move_right"), Input.get_axis("crouch", "sprint"))
 
 
-## Velocity kick from the host (shoves, extinguisher thrust, turbulence).
 func apply_push(vel: Vector3) -> void:
 	if seated or piloting:
 		shake(0.4)
@@ -389,6 +559,11 @@ func _update_aim() -> void:
 	if piloting:
 		aim_prompt = "Leave the seat [E]   Gear [G]"
 		return
+	var cam = _tp_camera if _third_person else camera
+	if not cam or not ray:
+		return
+	ray.global_position = cam.global_position
+	ray.target_position = cam.global_position - cam.global_basis.z * REACH
 	ray.force_raycast_update()
 	if not ray.is_colliding():
 		aim_prompt = "Drop [E]  Throw [LMB]  Use [RMB]" if held_id else ""
@@ -444,7 +619,10 @@ func _on_interact() -> void:
 func _on_primary() -> void:
 	if piloting:
 		return
-	var dir := -camera.global_basis.z
+	var cam = _tp_camera if _third_person else camera
+	if not cam:
+		return
+	var dir: Vector3 = -cam.global_basis.z
 	if held_id:
 		world.request("throw", [held_id, dir])
 		return
@@ -460,26 +638,6 @@ func _on_primary() -> void:
 			world.request("punch_player", [_aim.peer, dir])
 
 
-func _animate_hands(dt: float) -> void:
-	_punch_t = maxf(0.0, _punch_t - dt)
-	var hv := Vector2(velocity.x, velocity.z).length()
-	if is_on_floor() and hv > 0.5 and not seated and not piloting:
-		_bob_t += dt * hv * 2.2
-	var bob := Vector3(cos(_bob_t * 0.5) * 0.025, -absf(sin(_bob_t * 0.5)) * 0.04, 0)
-	var hold := held_id != 0
-	var punch := sin(_punch_t / PUNCH_COOLDOWN * PI) * 0.25
-	var reach := Vector3(-0.06, 0.08, -0.1) if hold else Vector3.ZERO
-	_hand_l.position = _hand_l.position.lerp(Vector3(-HAND_REST.x - reach.x, HAND_REST.y + reach.y, HAND_REST.z + reach.z) + bob, dt * 14)
-	_hand_r.position = _hand_r.position.lerp(HAND_REST + reach + Vector3(0, 0, -punch) - bob, dt * 14)
-	if piloting:
-		_hand_l.position = _hand_l.position.lerp(Vector3(-0.15, -0.26, -0.45), dt * 10)
-		_hand_r.position = _hand_r.position.lerp(Vector3(0.15, -0.26, -0.45), dt * 10)
-	var t := _trauma * _trauma
-	camera.h_offset = randf_range(-1, 1) * 0.08 * t
-	camera.v_offset = randf_range(-1, 1) * 0.08 * t
-	camera.rotation.z = randf_range(-1, 1) * 0.05 * t
-
-
 # --- Remote --------------------------------------------------------------------------
 
 func apply_remote_state(st: Array) -> void:
@@ -490,9 +648,14 @@ func apply_remote_state(st: Array) -> void:
 	_remote_flags = st[4]
 	seated = (_remote_flags & 1) != 0
 	crouching = (_remote_flags & 4) != 0
+	piloting = (_remote_flags & 2) != 0
+	held_id = (_remote_flags & 8) != 0
 	if not _has_remote:
 		_has_remote = true
 		global_position = _remote_pos
+		rotation.y = _remote_yaw
+		if head:
+			head.rotation.x = _remote_pitch
 
 
 func _remote_update(dt: float) -> void:
@@ -501,9 +664,32 @@ func _remote_update(dt: float) -> void:
 	var k := clampf(dt * 15.0, 0.0, 1.0)
 	global_position = global_position.lerp(_remote_pos, k)
 	rotation.y = lerp_angle(rotation.y, _remote_yaw, k)
-	head.rotation.x = _remote_pitch
-	if _body_vis:
-		var sitting := (_remote_flags & 3) != 0
-		_legs.rotation.x = lerpf(_legs.rotation.x, PI / 2 if sitting else 0.0, k)
-		_body_vis.position.y = lerpf(_body_vis.position.y, -0.35 if sitting else (-0.3 if crouching else 0.0), k)
-		_arms_vis.rotation.x = lerpf(_arms_vis.rotation.x, PI / 2 if (_remote_flags & 8) or piloting else 0.0, k)
+	if head:
+		head.rotation.x = _remote_pitch
+	
+	if _tp_parts:
+		var sitting := seated or piloting
+		_tp_parts.legs.rotation.x = lerpf(_tp_parts.legs.rotation.x, PI / 2 if sitting else 0.0, k)
+		_tp_parts.body_vis.position.y = lerpf(_tp_parts.body_vis.position.y, -0.35 if sitting else (-0.3 if crouching else 0.0), k)
+		
+		# Walk cycle for remote players
+		if not sitting:
+			# Calculate horizontal speed from position delta
+			var hv = (global_position - _remote_pos).length() * 15.0  # approximate
+			PlayerLook.animate_tp_body(_tp_parts, hv, dt, crouching, seated, piloting, held_id, k)
+		else:
+			# Seated pose
+			if piloting:
+				var hand_l = _tp_parts.hand_l
+				var hand_r = _tp_parts.hand_r
+				if hand_l:
+					hand_l.position = hand_l.position.lerp(Vector3(-0.25, -0.35, -0.3), k)
+				if hand_r:
+					hand_r.position = hand_r.position.lerp(Vector3(0.25, -0.35, -0.3), k)
+
+
+# --- Cleanup ---------------------------------------------------------------------------
+
+func _exit_tree() -> void:
+	if is_local and Settings:
+		Settings.changed.disconnect(_on_settings_changed)
