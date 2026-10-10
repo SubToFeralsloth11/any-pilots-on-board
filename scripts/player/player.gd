@@ -297,7 +297,8 @@ func _send_pilot_input() -> void:
 	if world.input_blocked():
 		world.send_pilot_input(0, 0, 0)
 		return
-	world.send_pilot_input(Input.get_axis("move_forward", "move_back") * -1.0,
+	# Yoke style: W pushes the nose down, S pulls it up.
+	world.send_pilot_input(Input.get_axis("move_forward", "move_back"),
 		Input.get_axis("move_left", "move_right"), Input.get_axis("crouch", "sprint"))
 
 

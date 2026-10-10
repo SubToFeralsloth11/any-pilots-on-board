@@ -28,6 +28,7 @@ const WINDOW_PUNCHES := 3
 const PropsModule := preload("res://scripts/props/props_module.gd")
 const NpcModule := preload("res://scripts/npcs/npc_module.gd")
 const StoryModule := preload("res://scripts/story/story.gd")
+const FunModule := preload("res://scripts/fun/fun_module.gd")
 const OutsideScene := preload("res://scripts/outside/outside.gd")
 const HudScript := preload("res://scripts/ui/hud.gd")
 
@@ -38,6 +39,7 @@ var hud: CanvasLayer
 var props: Node
 var npcs: Node
 var story: Node
+var fun: Node
 var objects_root: Node3D
 var players_root: Node3D
 
@@ -83,6 +85,7 @@ func _ready() -> void:
 	props = _add_module(PropsModule, "Props")
 	npcs = _add_module(NpcModule, "Npcs")
 	story = _add_module(StoryModule, "Story")
+	fun = _add_module(FunModule, "Fun")
 	hud = HudScript.new()
 	hud.name = "Hud"
 	hud.set("world", self)
@@ -91,7 +94,7 @@ func _ready() -> void:
 	if is_server():
 		multiplayer.peer_disconnected.connect(_on_peer_left)
 		_add_player(1, Net.local_name)
-		for m in [props, npcs, story]:
+		for m in [props, npcs, story, fun]:
 			m.populate()
 	else:
 		_rpc_client_ready.rpc_id(1, Net.local_name)
@@ -453,6 +456,7 @@ func _register_core_actions() -> void:
 			_broadcast_pilot(0))
 	register_action("gear", _act_gear)
 	register_action("fell_out", _act_fell_out)
+	register_action("use_item", _act_use_item)
 
 
 func _player_near(peer: int, global_p: Vector3, reach: float) -> bool:
@@ -559,6 +563,15 @@ func _act_pilot_enter(peer: int, _args: Array) -> void:
 func _act_gear(peer: int, _args: Array) -> void:
 	if peer == pilot_peer and flight.phase == FlightModel.Phase.FLYING:
 		set_plane("gear", not flight.gear_down)
+
+
+## Right-click with something in hand: the held object's own use(peer, origin, dir) runs on the host.
+func _act_use_item(peer: int, args: Array) -> void:
+	var id := int(args[0])
+	var obj: Node3D = objects.get(id)
+	if obj == null or int(holders.get(peer, 0)) != id or not obj.has_method("use"):
+		return
+	obj.use(peer, args[1] as Vector3, (args[2] as Vector3).normalized())
 
 
 func _act_fell_out(peer: int, _args: Array) -> void:
