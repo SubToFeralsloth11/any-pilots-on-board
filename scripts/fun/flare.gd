@@ -14,8 +14,6 @@ func _configure(_extra: Dictionary) -> void:
 	display = "burning flare"
 	mass = 0.15
 	continuous_cd = true
-	contact_monitor = true
-	max_contacts_reported = 2
 	gravity_scale = 0.5
 	physics_material_override = FunLooks.phys(0.3, 0.6)
 	var s := SphereShape3D.new()
@@ -48,6 +46,8 @@ func get_prompt() -> String:
 
 func _ready() -> void:
 	if world.is_server():
+		contact_monitor = true
+		max_contacts_reported = 2
 		body_entered.connect(_on_hit)
 
 

@@ -9,15 +9,16 @@ static var _sounds := {}
 
 
 ## Plays a synthesized sound at a global position: squeak, clang, crash, fizz, chomp, spray,
-## spark, rip, horn. Each sound is generated once and cached.
-static func sound(parent: Node, at: Vector3, sound_name: String, volume_db := 0.0) -> void:
+## spark, rip, horn, and the impact sounds thud (soft), knock (hard/wood) and clank (metal).
+## Each sound is generated once and cached. `pitch` scales the (slightly randomised) pitch.
+static func sound(parent: Node, at: Vector3, sound_name: String, volume_db := 0.0, pitch := 1.0) -> void:
 	if not _sounds.has(sound_name):
 		_sounds[sound_name] = _synth(sound_name)
 	var p := AudioStreamPlayer3D.new()
 	p.stream = _sounds[sound_name]
 	p.volume_db = volume_db
 	p.unit_size = 4.0
-	p.pitch_scale = randf_range(0.92, 1.08)
+	p.pitch_scale = pitch * randf_range(0.92, 1.08)
 	parent.add_child(p)
 	p.global_position = at
 	p.finished.connect(p.queue_free)
@@ -26,7 +27,8 @@ static func sound(parent: Node, at: Vector3, sound_name: String, volume_db := 0.
 
 static func _synth(sound_name: String) -> AudioStreamWAV:
 	var dur: float = {"squeak": 0.32, "clang": 0.7, "crash": 0.45, "fizz": 1.2, "chomp": 0.22,
-		"spray": 0.35, "spark": 0.5, "rip": 0.3, "horn": 0.6}.get(sound_name, 0.3)
+		"spray": 0.35, "spark": 0.5, "rip": 0.3, "horn": 0.6, "thud": 0.25, "knock": 0.2,
+		"clank": 0.35}.get(sound_name, 0.3)
 	var n := int(dur * MIX_RATE)
 	var data := PackedByteArray()
 	data.resize(n * 2)
@@ -59,6 +61,14 @@ static func _synth(sound_name: String) -> AudioStreamWAV:
 			"horn":
 				phase += (220.0 + 8.0 * sin(t * 30.0)) / MIX_RATE
 				v = (fposmod(phase, 1.0) * 2.0 - 1.0) * 0.3 * minf(1.0, (1.0 - k) * 6.0)
+			"thud":
+				v = sin(t * 75.0 * TAU) * 0.6 * exp(-t * 22.0) + randf_range(-1, 1) * 0.25 * exp(-t * 60.0)
+			"knock":
+				v = (sin(t * 210.0 * TAU) + 0.5 * sin(t * 470.0 * TAU)) * 0.4 * exp(-t * 35.0) \
+					+ randf_range(-1, 1) * 0.3 * exp(-t * 90.0)
+			"clank":
+				v = (sin(t * 740.0 * TAU) + 0.7 * sin(t * 1630.0 * TAU) + 0.4 * sin(t * 2890.0 * TAU)) \
+					* 0.25 * exp(-t * 16.0) + randf_range(-1, 1) * 0.3 * exp(-t * 80.0)
 		data.encode_s16(i * 2, int(clampf(v, -1.0, 1.0) * 32000.0))
 	var w := AudioStreamWAV.new()
 	w.format = AudioStreamWAV.FORMAT_16_BITS

@@ -20,11 +20,10 @@ func _configure(extra: Dictionary) -> void:
 	var color: Color = COLORS[int(extra.get("color", 0)) % COLORS.size()]
 	display = "foam dart" if foam else "dart"
 	hint = "Throw it [LMB] at the dartboard on the cargo-hold bulkhead." if not foam else ""
-	mass = 0.03 if foam else 0.05
+	mass = 0.025 if foam else 0.03
 	continuous_cd = true
-	contact_monitor = true
-	max_contacts_reported = 4
-	physics_material_override = FunLooks.phys(0.5, 0.3)
+	linear_damp = 0.15 if foam else 0.02
+	physics_material_override = FunLooks.phys(0.5, 0.45 if foam else 0.2)
 	var cap := CapsuleShape3D.new()
 	cap.radius = 0.02
 	cap.height = 0.17
@@ -44,8 +43,14 @@ func _configure(extra: Dictionary) -> void:
 			part(flight, FunLooks.mat(color, 0.5), Vector3(0, 0, 0.065), Vector3(-PI / 2, 0, i * PI / 2))
 
 
+func _look_key(extra: Dictionary) -> String:
+	return "dart/%s/%d" % [bool(extra.get("foam", false)), int(extra.get("color", 0)) % COLORS.size()]
+
+
 func _ready() -> void:
 	if world.is_server():
+		contact_monitor = true
+		max_contacts_reported = 4
 		body_entered.connect(_on_hit)
 
 

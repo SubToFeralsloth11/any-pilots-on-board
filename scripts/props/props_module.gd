@@ -3,8 +3,9 @@ extends Node
 ##
 ## setup() (all peers) registers a factory for every kind in Looks.SPECS and the "search" host
 ## action. populate() (host) scatters ~44 pieces of cabin clutter, a drinks cart and 10 cargo
-## crates. The module also keeps debris under a cap and estimates player velocities (host) for
-## crate pushing and banana-peel slips. Per-object behaviour lives in prop.gd.
+## crates. The module also keeps debris under a cap, estimates player velocities (host) for
+## banana-peel slips, and shoves loose props out of a walking player's way. Per-object
+## behaviour lives in prop.gd.
 
 const Prop := preload("res://scripts/props/prop.gd")
 const Looks := preload("res://scripts/props/prop_looks.gd")
@@ -14,11 +15,20 @@ const MAX_DEBRIS := 40
 const SEARCH_REACH := 3.2
 ## Seats players get on joining (World uses (n * 9 + 3) % 32); keep them clear of clutter.
 const PLAYER_SEATS := [3, 12, 21, 30, 7, 16, 25, 2]
+## Shoving: players walk through props (they are not in the player's mask). Anything loose that
+## overlaps a moving player's capsule is nudged along at up to the player's speed, capped by
+## mass (Prop.PUSH_*): a can skitters off, a crate scoots, nothing launches.
+const SHOVE_RADIUS := 0.38
+const SHOVE_HEIGHT := 1.6
+const SHOVE_MIN_SPEED := 0.3
+const SHOVE_FOLLOW := 1.1       ## Prop speed relative to the player's approach speed.
+const SHOVE_MAX_HITS := 8
 
 var world: World
 var _debris: Array[int] = []
 var _player_pos := {}      ## Host: peer -> last position.
 var _player_vel := {}      ## Host: peer -> smoothed velocity.
+var _shove_query: PhysicsShapeQueryParameters3D
 
 
 func setup(w: World) -> void:
@@ -42,15 +52,53 @@ func player_velocity(peer: int) -> Vector3:
 
 func _physics_process(dt: float) -> void:
 	for peer in world.players:
-		var pos: Vector3 = (world.players[peer] as Player).global_position
+		var pl := world.players[peer] as Player
+		var pos: Vector3 = pl.global_position
 		var last: Vector3 = _player_pos.get(peer, pos)
 		var v := (pos - last) / dt
 		_player_vel[peer] = (_player_vel.get(peer, Vector3.ZERO) as Vector3).lerp(v, 0.3)
 		_player_pos[peer] = pos
+		if not pl.seated:
+			_shove_from(pl, _player_vel[peer])
 	for peer in _player_pos.keys():
 		if not world.players.has(peer):
 			_player_pos.erase(peer)
 			_player_vel.erase(peer)
+
+
+## Host: nudges loose props overlapping a moving player's capsule (wakes sleeping ones too).
+func _shove_from(pl: Player, vel: Vector3) -> void:
+	var up := world.plane.global_basis.y
+	var flat := vel - up * vel.dot(up)
+	if flat.length() < SHOVE_MIN_SPEED:
+		return
+	if _shove_query == null:
+		var cap := CapsuleShape3D.new()
+		cap.radius = SHOVE_RADIUS
+		cap.height = SHOVE_HEIGHT
+		_shove_query = PhysicsShapeQueryParameters3D.new()
+		_shove_query.shape = cap
+		_shove_query.collision_mask = Layers.PROP
+	_shove_query.transform = Transform3D(world.plane.global_basis, pl.global_position + up * (SHOVE_HEIGHT * 0.5 + 0.05))
+	var held: Array = world.holders.values()
+	for hit in pl.get_world_3d().direct_space_state.intersect_shape(_shove_query, SHOVE_MAX_HITS):
+		var body := hit.collider as RigidBody3D
+		if body == null or body.freeze or held.has(World.net_id(body)):
+			continue
+		if body.has_method("note_shoved"):
+			body.note_shoved()
+		var d := body.global_position - pl.global_position
+		d -= up * d.dot(up)
+		var n := d.normalized() if d.length() > 0.05 else flat.normalized()
+		var along := flat.dot(n)
+		if along <= SHOVE_MIN_SPEED:
+			continue
+		var cap_speed := clampf(Prop.PUSH_SPEED / sqrt(body.mass), Prop.PUSH_MIN, Prop.PUSH_MAX)
+		var want := minf(along * SHOVE_FOLLOW, cap_speed)
+		var cur := body.linear_velocity.dot(n)
+		if cur < want:
+			body.sleeping = false
+			body.apply_central_impulse(n * (want - cur) * body.mass)
 
 
 ## Host: a broken prop bursts into 3-5 small pieces that fade after a while.

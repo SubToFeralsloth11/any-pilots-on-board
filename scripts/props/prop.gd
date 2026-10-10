@@ -2,9 +2,10 @@ extends RigidBody3D
 ## One networked loose object from the Props module: luggage, cans, laptops, the drinks cart,
 ## cargo crates, items and debris. Visuals come from prop_looks.gd, [RMB] behaviour from items.gd.
 ##
-## Host only: impact detection (breakage, window smashing, thrown-wrench hits), can fizzing,
-## crate pushing, banana-peel slipping and debris expiry. Every visible result is broadcast
-## with world.object_event and handled in on_net_event on all peers.
+## Host only: impact detection (breakage, window smashing, thrown-wrench hits, impact sounds),
+## can fizzing, banana-peel slipping, debris expiry and taming the shove a player's capsule
+## gives a prop it walks through. Every visible result is broadcast with world.object_event and
+## handled in on_net_event on all peers.
 
 const Looks := preload("res://scripts/props/prop_looks.gd")
 const Items := preload("res://scripts/props/items.gd")
@@ -13,20 +14,31 @@ const Fx := preload("res://scripts/props/fx.gd")
 const BREAK_SPEED := 7.0       ## Velocity change in one contact that breaks a breakable.
 const GLASS_SPEED := 6.0       ## Impact speed that smashes a window.
 const WRENCH_SMASH_SPEED := 4.0
-const SPAWN_GRACE := 1.5       ## No breakage while freshly spawned objects settle.
+const SPAWN_GRACE := 1.5       ## No breakage or impact sounds while freshly spawned objects settle.
 const DEBRIS_LIFE := 10.0
 const FIZZ_TIME := 2.5
 const FIZZ_THRUST := 32.0
 const THROWN_TIME := 2.0
 const SLIP_RADIUS := 0.45
 const SLIP_COOLDOWN := 2.0
-const CRATE_PUSH_RANGE := 0.95
+## Player shoves: horizontal speed cap is PUSH_SPEED / sqrt(mass), clamped to PUSH_MIN..PUSH_MAX,
+## so a can skitters off at walking pace while a 55 kg crate only scoots along.
+const PUSH_SPEED := 9.0
+const PUSH_MIN := 0.8
+const PUSH_MAX := 5.0
+const PUSH_LIFT := 0.5         ## Max upward speed from a shove.
+const PUSH_SPIN := 4.0         ## Max spin (rad/s) from a shove.
+const SHOVE_HOLD := 0.15       ## Seconds the shove cap lasts after the last overlap report.
+const IMPACT_MIN := 1.4        ## Velocity change (m/s) that makes an impact sound.
+const IMPACT_GAP := 0.25       ## Seconds between impact sounds from one prop.
+const IMPACT_BUDGET := 6       ## Impact sounds per IMPACT_WINDOW across all props.
+const IMPACT_WINDOW := 0.5
 
 const SLIP_LINES := ["WHOA-OA-OAAA!", "*slips on a banana peel like a cartoon*", "MY SPINE!",
 	"Who left a banana peel on a PLANE?!", "*does a full backflip, accidentally*"]
-const NO_CCD := ["crate", "cart", "debris"]
 
-static var _physics_mats := {}
+static var _impact_window_start := 0.0
+static var _impact_count := 0
 
 var world: World
 var spawn_debris: Callable   ## Module hook: (kind, extra, at, vel) -> void (host).
@@ -42,6 +54,10 @@ var _thrown_t := 0.0
 var _thrower := 0
 var _fizz_t := 0.0
 var _broken := false
+var _carried := false                ## Host: someone is holding it (World steers it).
+var _shoved_t := 0.0                 ## Host: seconds left of "a player capsule overlaps me".
+var _push_cap := PUSH_MAX
+var _last_impact := -10.0
 var _pending: Array[Callable] = []   ## Host reactions deferred out of physics callbacks.
 var _slip_until := {}                ## Body/peer key -> time it can slip again.
 
@@ -54,11 +70,16 @@ func setup(w: World, p_kind: String, extra: Dictionary, debris_hook: Callable, v
 	kind = p_kind
 	state = extra.duplicate()
 	var spec: Dictionary = Looks.SPECS[kind]
+	var surf := Looks.surface(kind)
 	mass = spec.mass
-	physics_material_override = _physics_mat(spec.friction)
+	physics_material_override = Looks.physics_material(kind)
+	linear_damp = surf.lin
+	angular_damp = surf.ang
+	can_sleep = true
+	_push_cap = clampf(PUSH_SPEED / sqrt(mass), PUSH_MIN, PUSH_MAX)
 	collision_layer = Layers.PROP
 	collision_mask = Layers.WORLD if kind == "debris" else Layers.WORLD | Layers.PLAYER | Layers.PROP | Layers.NPC
-	continuous_cd = not NO_CCD.has(kind)
+	continuous_cd = false
 	if spec.grab:
 		add_to_group("grabbable")
 	if kind == "cart":
@@ -75,7 +96,7 @@ func _ready() -> void:
 		Looks.show_peel(parts)
 	var host := world.is_server()
 	set_physics_process(host)
-	if host:
+	if host and kind != "debris":
 		contact_monitor = true
 		max_contacts_reported = 4
 		body_shape_entered.connect(_on_body_shape_entered)
@@ -94,14 +115,21 @@ func get_spawn_extra() -> Dictionary:
 
 
 func on_grabbed(peer: int) -> void:
+	_carried = true
 	var key := "peel" if kind == "banana" and state.get("peeled", false) else kind
 	if Looks.HINTS.has(key):
 		world.notify(peer, Looks.HINTS[key])
 
 
+func on_released() -> void:
+	_carried = false
+
+
 func on_thrown(peer: int) -> void:
 	_thrown_t = THROWN_TIME
 	_thrower = peer
+	if Looks.SMALL.has(kind):
+		continuous_cd = true
 
 
 ## [RMB] with this object in hand (host; World already checked the holder).
@@ -145,11 +173,16 @@ func open_crate() -> bool:
 func _physics_process(dt: float) -> void:
 	_age += dt
 	cooldown = maxf(0.0, cooldown - dt)
-	_thrown_t = maxf(0.0, _thrown_t - dt)
-	var queued := _pending
-	_pending = []
-	for c in queued:
-		c.call()
+	_shoved_t = maxf(0.0, _shoved_t - dt)
+	if _thrown_t > 0.0:
+		_thrown_t -= dt
+		if _thrown_t <= 0.0:
+			continuous_cd = false
+	if not _pending.is_empty():
+		var queued := _pending
+		_pending = []
+		for c in queued:
+			c.call()
 	if _broken:
 		return
 	match kind:
@@ -157,26 +190,38 @@ func _physics_process(dt: float) -> void:
 			if _age > DEBRIS_LIFE:
 				_broken = true
 				world.despawn_object(World.net_id(self))
-				return
+			return
 		"can":
 			if _fizz_t > 0.0:
 				_fizz_step(dt)
-		"crate":
-			_crate_push()
 		"peel":
 			_slip_check()
 		"banana":
 			if state.get("peeled", false):
 				_slip_check()
-	_prev_vel = linear_velocity
+	_prev_vel = Vector3.ZERO if sleeping else linear_velocity
 
 
-func _held() -> bool:
-	return world.holders.values().has(World.net_id(self))
+## Host: called by the Props module while a player's capsule overlaps this prop. Players are
+## kinematic and push into props (remote ones are even teleported by snapshots), so for a moment
+## the shove is capped by mass: a can skitters off, a crate scoots, nothing launches.
+func note_shoved() -> void:
+	_shoved_t = SHOVE_HOLD
+
+
+func _integrate_forces(st: PhysicsDirectBodyState3D) -> void:
+	if _shoved_t <= 0.0 or _carried or _thrown_t > 0.0:
+		return
+	var up := world.plane.global_basis.y
+	var v := st.linear_velocity
+	var vert := minf(v.dot(up), PUSH_LIFT)
+	var flat := (v - up * v.dot(up)).limit_length(_push_cap)
+	st.linear_velocity = flat + up * vert
+	st.angular_velocity = st.angular_velocity.limit_length(PUSH_SPIN)
 
 
 func _on_body_shape_entered(_rid: RID, body: Node, body_shape_index: int, _local_shape: int) -> void:
-	if _broken or _age < SPAWN_GRACE or _held() or body == null:
+	if _broken or _age < SPAWN_GRACE or _carried or body == null:
 		return
 	var approach := _prev_vel.length()
 	var jolt := (_prev_vel - linear_velocity).length()
@@ -188,6 +233,23 @@ func _on_body_shape_entered(_rid: RID, body: Node, body_shape_index: int, _local
 		_pending.append(_wrench_hit.bind(body))
 	if jolt > BREAK_SPEED and Looks.BREAKABLE.has(kind):
 		_pending.append(smash.bind(0))
+	elif jolt > IMPACT_MIN and not body is Player:
+		_impact(jolt)
+
+
+## Rate-limited impact sound, louder for harder hits (per prop and across all props).
+func _impact(strength: float) -> void:
+	var now := Time.get_ticks_msec() / 1000.0
+	if now - _last_impact < IMPACT_GAP:
+		return
+	if now - _impact_window_start > IMPACT_WINDOW:
+		_impact_window_start = now
+		_impact_count = 0
+	if _impact_count >= IMPACT_BUDGET:
+		return
+	_impact_count += 1
+	_last_impact = now
+	_pending.append(world.object_event.bind(World.net_id(self), "impact", [snappedf(strength, 0.1)]))
 
 
 func _wrench_hit(body: Node) -> void:
@@ -221,27 +283,9 @@ func _fizz_step(dt: float) -> void:
 	apply_torque(Vector3(randf_range(-1, 1), 4.0, randf_range(-1, 1)) * 0.004)
 
 
-## Heavy crates scoot along when a player walks into them.
-func _crate_push() -> void:
-	var up := world.plane.global_basis.y
-	for peer in world.players:
-		var pl: Player = world.players[peer]
-		var d := global_position - pl.global_position
-		var height := d.dot(up)
-		d -= up * height
-		if d.length() > CRATE_PUSH_RANGE or height > 0.9 or height < -0.2:
-			continue
-		var n := d.normalized()
-		var mv: Vector3 = player_velocity.call(peer)
-		var along := mv.dot(n)
-		if along > 0.3:
-			var cur := linear_velocity.dot(n)
-			apply_central_force(n * mass * clampf((along * 0.8 - cur) * 10.0, 0.0, 22.0))
-
-
 ## Players and passengers who walk over a peel on the floor go flying.
 func _slip_check() -> void:
-	if _held():
+	if _carried:
 		return
 	var now := Time.get_ticks_msec() / 1000.0
 	var up := world.plane.global_basis.y
@@ -274,15 +318,6 @@ func _slip_check() -> void:
 func _slipped(kick: Vector3) -> void:
 	world.object_event(World.net_id(self), "slip")
 	apply_central_impulse((kick + world.plane.global_basis.y * 0.6) * mass * 3.0)
-
-
-static func _physics_mat(friction: float) -> PhysicsMaterial:
-	if not _physics_mats.has(friction):
-		var m := PhysicsMaterial.new()
-		m.friction = friction
-		m.bounce = 0.08
-		_physics_mats[friction] = m
-	return _physics_mats[friction]
 
 
 # --- Cosmetics (all peers) -------------------------------------------------------------
@@ -351,6 +386,11 @@ func on_net_event(event: String, args: Array) -> void:
 		"slip":
 			Fx.popup(fxroot, at, "WHOOPS!", Color(1, 0.9, 0.2), 72)
 			Fx.sound(fxroot, at, "squeak", -4.0)
+		"impact":
+			var surf := Looks.surface(kind)
+			var loud := clampf(float(args[0]) / 8.0, 0.08, 1.0)
+			var pitch: float = surf.pitch / clampf(sqrt(mass / 4.0), 0.7, 1.6)
+			Fx.sound(fxroot, at, surf.sound, linear_to_db(loud) - 4.0, pitch)
 
 
 ## Lid flies off spinning, splinters everywhere, the crate stays open.

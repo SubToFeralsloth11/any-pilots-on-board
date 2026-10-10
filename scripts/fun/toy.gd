@@ -2,7 +2,11 @@ class_name FunToy
 extends RigidBody3D
 ## Base for every loose fun-module object (balls, checkers, dice, darts, weapons): a networked,
 ## grabbable prop-layer rigid body that remembers who handled it last. Subclasses build their
-## look under `vis` and their collision shapes in _configure().
+## look under `vis` and their collision shapes in _configure(). Afterwards the static pieces of
+## `vis` are merged into one cached mesh (PropLooks.merge_static); direct children of `vis` with
+## an explicit name (e.g. the drill "Bit") stay separate so they can animate.
+
+const PropLooks := preload("res://scripts/props/prop_looks.gd")
 
 var world: World
 var kind := ""
@@ -18,15 +22,28 @@ func _init(w: World, k: String, extra: Dictionary = {}) -> void:
 	kind = k
 	collision_layer = Layers.PROP
 	collision_mask = Layers.WORLD | Layers.PLAYER | Layers.PROP | Layers.NPC
+	linear_damp = 0.08
+	angular_damp = 0.6
+	can_sleep = true
 	add_to_group("grabbable")
 	vis = Node3D.new()
 	add_child(vis)
 	_configure(extra)
+	var keep: Array = []
+	for c in vis.get_children():
+		if not String(c.name).begins_with("@"):
+			keep.append(c)
+	PropLooks.merge_static(vis, keep, "fun/" + _look_key(extra))
 
 
 ## Sets mass, physics material, shapes and visuals. Overridden per kind.
 func _configure(_extra: Dictionary) -> void:
 	pass
+
+
+## Identifies everything in `extra` that changes the look (merged-mesh cache key).
+func _look_key(extra: Dictionary) -> String:
+	return "%s/%s" % [kind, extra]
 
 
 func add_shape(shape: Shape3D, xform := Transform3D.IDENTITY) -> void:
