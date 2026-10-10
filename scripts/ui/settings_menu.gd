@@ -14,6 +14,7 @@ const LABEL_W := 230.0
 var _sliders := {}     ## setting key -> [HSlider, value Label, formatter Callable]
 var _toggles := {}     ## setting key -> Button
 var _quality: Array[Button] = []
+var _choices := {}     ## setting key -> [Array[Button], option values]
 
 
 func _ready() -> void:
@@ -38,6 +39,10 @@ func _ready() -> void:
 	_quality_row(box)
 	_toggle_row(box, "Fullscreen", "fullscreen")
 	_toggle_row(box, "Show FPS counter", "show_fps")
+	_choice_row(box, "Voice chat", "voice_mode", Settings.VOICE_MODES, func(v: String) -> String:
+		return {"off": "Off", "push": "Hold T", "open": "Open mic"}[v])
+	_slider_row(box, "Microphone gain", "mic_gain", 0.1, 4.0, 0.1, func(v: float) -> String: return "%.1fx" % v)
+	_slider_row(box, "Voice volume", "voice_volume", 0.0, 1.0, 0.01, func(v: float) -> String: return "%d%%" % roundi(v * 100))
 	var back := Button.new()
 	back.text = "Back"
 	back.custom_minimum_size = Vector2(240, 52)
@@ -56,6 +61,11 @@ func open() -> void:
 		_set_toggle(_toggles[key], bool(Settings.get(key)))
 	for i in _quality.size():
 		_quality[i].set_pressed_no_signal(i == Settings.quality)
+	for key: String in _choices:
+		var buttons: Array[Button] = _choices[key][0]
+		var options: Array = _choices[key][1]
+		for i in buttons.size():
+			buttons[i].set_pressed_no_signal(options[i] == Settings.get(key))
 	visible = true
 
 
@@ -172,3 +182,24 @@ func _box(color: Color, radius: int, pad: float, border := Color.TRANSPARENT) ->
 		s.shadow_size = 10
 		s.shadow_offset = Vector2(0, 6)
 	return s
+
+
+## One button per option (like the quality row); `options` are the stored values, `fmt` makes the caption.
+func _choice_row(parent: Control, text: String, key: String, options: Array, fmt: Callable) -> void:
+	var row := _row(parent, text)
+	var group := ButtonGroup.new()
+	var buttons: Array[Button] = []
+	for opt: String in options:
+		var b := Button.new()
+		b.text = fmt.call(opt)
+		b.toggle_mode = true
+		b.button_group = group
+		b.custom_minimum_size = Vector2(98, 42)
+		b.add_theme_font_size_override("font_size", 18)
+		b.add_theme_stylebox_override("normal", _box(OFF_COLOR, 14, 10.0))
+		b.add_theme_stylebox_override("pressed", _box(GOLD.darkened(0.15), 14, 10.0))
+		b.add_theme_stylebox_override("hover_pressed", _box(GOLD.darkened(0.05), 14, 10.0))
+		b.pressed.connect(func() -> void: Settings.set_value(key, opt))
+		row.add_child(b)
+		buttons.append(b)
+	_choices[key] = [buttons, options]

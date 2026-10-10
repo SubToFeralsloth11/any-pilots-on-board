@@ -1,6 +1,7 @@
 extends Node
 ## Player preferences (autoload "Settings"), saved to user://settings.cfg and applied live.
-## Readers: Player (mouse_sensitivity, invert_y, fov), scenery/lights (quality), HUD (show_fps).
+## Readers: Player (mouse_sensitivity, invert_y, fov), scenery/lights (quality), HUD (show_fps),
+## Voice (voice_mode, mic_gain, voice_volume).
 ## Change values through set_value() so they are applied, saved and announced via `changed`.
 
 signal changed
@@ -9,7 +10,8 @@ const PATH := "user://settings.cfg"
 const QUALITY_NAMES := ["Low", "Medium", "High"]
 const RENDER_SCALE := [0.7, 0.85, 1.0]
 const MSAA := [Viewport.MSAA_DISABLED, Viewport.MSAA_2X, Viewport.MSAA_4X]
-const KEYS := ["mouse_sensitivity", "invert_y", "fov", "master_volume", "quality", "fullscreen", "show_fps"]
+const VOICE_MODES := ["off", "push", "open"]
+const KEYS := ["mouse_sensitivity", "invert_y", "fov", "master_volume", "quality", "fullscreen", "show_fps", "voice_mode", "mic_gain", "voice_volume"]
 
 var mouse_sensitivity := 1.0   ## Multiplier on Player.MOUSE_SENS (0.2..3).
 var invert_y := false
@@ -18,6 +20,9 @@ var master_volume := 0.8       ## Linear 0..1.
 var quality := 2               ## Index into QUALITY_NAMES.
 var fullscreen := false
 var show_fps := false
+var voice_mode := "push"       ## Voice chat: "off", "push" (hold [T]) or "open" (voice activation).
+var mic_gain := 1.0            ## Microphone gain multiplier (0.1..4).
+var voice_volume := 0.8        ## Linear 0..1, other players' voices.
 
 
 func _ready() -> void:
@@ -25,6 +30,9 @@ func _ready() -> void:
 	if cfg.load(PATH) == OK:
 		for k: String in KEYS:
 			set(k, cfg.get_value("settings", k, get(k)))
+	voice_mode = "push" if VOICE_MODES.find(voice_mode) == -1 else voice_mode
+	mic_gain = clampf(mic_gain, 0.1, 4.0)
+	voice_volume = clampf(voice_volume, 0.0, 1.0)
 	quality = clampi(quality, 0, QUALITY_NAMES.size() - 1)
 	apply()
 
