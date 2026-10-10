@@ -92,6 +92,8 @@ func _ready() -> void:
 	hud.set("world", self)
 	add_child(hud)
 	_apply_outside_transform()
+	# Take the flight attitude before anything spawns, so loose objects start where the plane is.
+	plane.set_attitude(flight.pitch, flight.roll)
 	if is_server():
 		multiplayer.peer_disconnected.connect(_on_peer_left)
 		_add_player(1, Net.local_name)
