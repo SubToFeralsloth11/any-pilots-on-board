@@ -70,6 +70,7 @@ func _test_trimmed_cruise_holds_altitude() -> void:
 	_sim(f, 20.0)
 	_check(absf(f.pos.y - FlightModel.START_POS.y) < 80.0 and f.speed > 55.0,
 		"hands-off cruise at start throttle roughly holds altitude (%.0f m, %.0f m/s)" % [f.pos.y, f.speed])
+	_check(absf(f.felt_gravity() - 1.0) < 0.15, "steady cruise feels like 1 g (%.2f g)" % f.felt_gravity())
 
 
 func _test_gentle_runway_landing_rolls_to_a_stop() -> void:
