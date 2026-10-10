@@ -93,7 +93,6 @@ var _tp_camera: Camera3D
 # Movement state
 var _move_vel := Vector3.ZERO
 var _state_t := 0.0
-var _bob_t := 0.0
 var _punch_t := 0.0
 var _respawn_t := 0.0
 var _trauma := 0.0
@@ -140,8 +139,6 @@ func _ready() -> void:
 	add_child(head)
 	
 	var color: Color = COLORS[peer_id % COLORS.size()]
-	var skin := Color(0.96, 0.8, 0.65)
-	var hair: Color = [Color(0.25, 0.15, 0.08), Color(0.95, 0.8, 0.35), Color(0.1, 0.1, 0.1), Color(0.75, 0.3, 0.15)][peer_id % 4]
 	
 	if is_local:
 		# First-person camera
@@ -159,9 +156,9 @@ func _ready() -> void:
 		ray.add_exception(self)
 		camera.add_child(ray)
 		
-		# Build FP arms with sleeves and proper hands
-		_fp_parts = PlayerLook.build_fp_arms(color, skin, camera)
-		_hands_parent = _fp_parts.shoulder_l.get_parent()
+		# First-person crew arms (sleeves + mitten hands) in camera space
+		_fp_parts = PlayerLook.build_fp_arms(color, camera)
+		_hands_parent = _fp_parts.root
 		
 		# Third-person camera boom (initially disabled)
 		_cam_boom = Node3D.new()
@@ -179,13 +176,10 @@ func _ready() -> void:
 		_tp_camera.current = false
 		_cam_target.add_child(_tp_camera)
 		
-		# Build TP body for local player (hidden in 1st person)
-		_tp_parts = PlayerLook.build_tp_body(color, skin, hair, display_name, self)
+		# Crew body for the local player (only shown in 3rd person)
+		_tp_parts = PlayerLook.build_tp_body(color, display_name, self)
 		_tp_parts.body_vis.visible = false
 		_tp_parts.label.visible = false
-		# Set initial seated pose
-		_tp_parts.legs.rotation.x = PI / 2
-		_tp_parts.body_vis.position.y = -0.35
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 		
 		# Settings
@@ -194,10 +188,7 @@ func _ready() -> void:
 		_fov = Settings.fov
 		Settings.changed.connect(_on_settings_changed)
 	else:
-		_tp_parts = PlayerLook.build_tp_body(color, skin, hair, display_name, self)
-		# Initially seated
-		_tp_parts.legs.rotation.x = PI / 2
-		_tp_parts.body_vis.position.y = -0.35
+		_tp_parts = PlayerLook.build_tp_body(color, display_name, self)
 
 
 func _on_settings_changed() -> void:
@@ -417,16 +408,15 @@ func _move(dt: float) -> void:
 
 
 func _animate_local(dt: float) -> void:
-	# Animate FP arms
+	var hv := Vector2(velocity.x, velocity.z).length()
 	if _hands_parent and _hands_parent.visible:
-		var hv = Vector2(velocity.x, velocity.z).length()
-		_bob_t = PlayerLook.animate_fp_arms(_fp_parts, hv, dt, held_id != 0, piloting, _punch_t, _bob_t, _trauma)
-		_punch_t = maxf(0.0, _punch_t - dt)
-	
-	# Animate TP body (for local player in 3rd person)
+		var punch := 1.0 - _punch_t / PUNCH_COOLDOWN if _punch_t > 0.0 else 0.0
+		PlayerLook.animate_fp_arms(_fp_parts, dt, hv, held_id != 0, piloting, crouching, punch)
+	_punch_t = maxf(0.0, _punch_t - dt)
+
+	# Crew body (local player in 3rd person)
 	if _third_person and _tp_parts:
-		var hv = Vector2(velocity.x, velocity.z).length()
-		PlayerLook.animate_tp_body(_tp_parts, hv, dt, crouching, seated, piloting, held_id != 0, 1.0)
+		PlayerLook.animate_tp_body(_tp_parts, dt, hv, look_pitch, crouching, seated, piloting, held_id != 0)
 	
 	# Camera shake
 	var t := _trauma * _trauma
@@ -477,9 +467,6 @@ func sit(seat: Vector3) -> void:
 	rotation.y = 0.0
 	ext_vel = Vector3.ZERO
 	_move_vel = Vector3.ZERO
-	if _tp_parts:
-		_tp_parts.legs.rotation.x = PI / 2
-		_tp_parts.body_vis.position.y = -0.35
 
 
 func stand() -> void:
@@ -487,9 +474,6 @@ func stand() -> void:
 		global_position = world.plane.to_global(seat_local + Vector3(0, 0.05, 0))
 	seated = false
 	_shape.set_deferred("disabled", false)
-	if _tp_parts:
-		_tp_parts.legs.rotation.x = 0.0
-		_tp_parts.body_vis.position.y = 0.0
 
 
 func _stick_to_seat(dt: float) -> void:
@@ -662,30 +646,16 @@ func _remote_update(dt: float) -> void:
 	if not _has_remote:
 		return
 	var k := clampf(dt * 15.0, 0.0, 1.0)
+	var before := global_position
 	global_position = global_position.lerp(_remote_pos, k)
 	rotation.y = lerp_angle(rotation.y, _remote_yaw, k)
 	if head:
 		head.rotation.x = _remote_pitch
-	
-	if _tp_parts:
-		var sitting := seated or piloting
-		_tp_parts.legs.rotation.x = lerpf(_tp_parts.legs.rotation.x, PI / 2 if sitting else 0.0, k)
-		_tp_parts.body_vis.position.y = lerpf(_tp_parts.body_vis.position.y, -0.35 if sitting else (-0.3 if crouching else 0.0), k)
-		
-		# Walk cycle for remote players
-		if not sitting:
-			# Calculate horizontal speed from position delta
-			var hv = (global_position - _remote_pos).length() * 15.0  # approximate
-			PlayerLook.animate_tp_body(_tp_parts, hv, dt, crouching, seated, piloting, held_id, k)
-		else:
-			# Seated pose
-			if piloting:
-				var hand_l = _tp_parts.hand_l
-				var hand_r = _tp_parts.hand_r
-				if hand_l:
-					hand_l.position = hand_l.position.lerp(Vector3(-0.25, -0.35, -0.3), k)
-				if hand_r:
-					hand_r.position = hand_r.position.lerp(Vector3(0.25, -0.35, -0.3), k)
+
+	if _tp_parts and dt > 0.0:
+		var moved := global_position - before
+		var hv := Vector2(moved.x, moved.z).length() / dt
+		PlayerLook.animate_tp_body(_tp_parts, dt, hv, _remote_pitch, crouching, seated, piloting, held_id != 0)
 
 
 # --- Cleanup ---------------------------------------------------------------------------
