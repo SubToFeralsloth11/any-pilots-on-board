@@ -12,7 +12,7 @@ const ACTIONS := {
 	"move_forward": [KEY_W], "move_back": [KEY_S], "move_left": [KEY_A], "move_right": [KEY_D],
 	"jump": [KEY_SPACE], "sprint": [KEY_SHIFT], "crouch": [KEY_CTRL, KEY_C],
 	"interact": [KEY_E], "shout": [KEY_Y], "gear": [KEY_G], "flaps": [KEY_F], "pause": [KEY_ESCAPE], "restart": [KEY_R],
-	"camera": [KEY_V],
+	"camera": [KEY_V], "seatbelt": [KEY_B], "talk": [KEY_T],
 	"throw": [MOUSE_BUTTON_LEFT], "use": [MOUSE_BUTTON_RIGHT], "ping": [MOUSE_BUTTON_MIDDLE],
 }
 const MOUSE_ACTIONS := ["throw", "use", "ping"]
