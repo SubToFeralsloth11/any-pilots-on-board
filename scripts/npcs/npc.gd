@@ -3,10 +3,13 @@ extends RigidBody3D
 ##
 ## The root body is the torso. Nine limb bodies (head, upper arms, forearms, thighs, shins)
 ## are top_level children returned by get_net_parts(). While seated, standing or walking the
-## limbs are kinematic and every peer poses them locally from the synced state. When hit,
-## grabbed, thrown, sucked out of a seat or knocked out, the host joins the limbs to the torso
-## with Generic6DOFJoint3D and the rig goes limp; World then streams every limb to clients
-## (net_parts_active() is true). Recovering people blend back up and walk to their own seat.
+## limbs are posed locally on every peer from the synced state and are taken out of the
+## physics space entirely (a head shape on the root stands in for them), so calm people cost
+## one body each. When hit, grabbed, thrown, sucked out of a seat or knocked out, the host
+## puts the limbs back, joins them to the torso with Generic6DOFJoint3D and the rig goes limp;
+## World then streams every limb to clients (net_parts_active() is true). Recovering people
+## get up in two stages (crouch, then stand) and walk to their own seat.
+## Seated people lean and sway with the felt gravity (host, replicated through the root).
 ## The root origin is the torso centre; the body faces -Z like the seats.
 
 enum State { SEATED, STAND, WALK, RAGDOLL, CARRIED, OUT }
@@ -57,18 +60,27 @@ const SHIN_L := 6
 const THIGH_R := 7
 const SHIN_R := 8
 const LIMBS := 9
-const LIMB_MASS := [4.0, 2.0, 1.6, 2.0, 1.6, 5.0, 3.5, 5.0, 3.5]
+## Roughly human mass fractions of a ~60 kg person (the torso root is TORSO_MASS).
+const LIMB_MASS := [4.5, 2.0, 1.5, 2.0, 1.5, 6.0, 4.0, 6.0, 4.0]
+const TORSO_MASS := 26.0
 
 const FEET := 1.19            ## Feet below the torso centre (unit size).
 const SEAT_LIFT := 0.33       ## Torso centre above the seat point (unit size).
 const WALK_SPEED := 1.5
 const MOVE_ACCEL := 6.0       ## Max self-propulsion (m/s^2); steep tilts still win.
+const STRIDE := 4.3           ## Gait phase per metre walked (feet plant instead of sliding).
 const RAGDOLL_TIME := 3.0
 const RELEASE_TIME := 2.5
 const BLEND_TIME := 0.6
+const CROUCH_DROP := 0.5      ## Root drop while crouching on the way up (unit size).
 const HIT_SPEED := 6.5        ## Relative speed of an incoming body that knocks someone over.
 const SUCK_LIMIT := 10.0      ## Suction (m/s^2) that rips someone out of their seat.
 const BUBBLE_TIME := 2.6
+const THINK_EVERY := 3        ## Host AI (panic, suction) runs every Nth physics frame, staggered.
+const ROW_FRONT := 0.62       ## Standing spot in front of a seat (toward the nose).
+const AISLE_HALF := 0.9       ## |x| below this counts as the aisle.
+const LEAN_MAX := 0.32        ## Max seated lean (rad).
+const LEAN_GAIN := 0.55       ## Fraction of the felt-gravity tilt a seated body follows.
 
 
 ## One ragdoll limb. Forwards prompts and punches to its person.
@@ -103,13 +115,19 @@ var _joint_parent: Array[int] = []      ## Parent limb per joint (-1 = torso).
 var _joint_child: Array[int] = []
 var _joints_on := false
 var _active := false                    ## Limbs simulated by physics (streamed by World).
+var _limbs_physical := true             ## Limb bodies currently in the physics space.
 var _unconscious := false               ## Captain after the blackout.
 var _legs_shape: CollisionShape3D
+var _head_shape: CollisionShape3D       ## Stands in for the head while the limbs are posed.
+var _belt: Node3D
 var _bubble: Label3D
 var _bubble_t := 0.0
 var _anim_t := 0.0
 var _phase := 0.0
+var _gait := 0.0
 var _pose := {}
+var _tgt := {}                          ## Reused target-pose buffer.
+var _xf_buf: Array[Transform3D] = []    ## Reused limb-transform buffer.
 var _last_pos := Vector3.ZERO
 var _speed_vis := 0.0
 var _timer := 0.0
@@ -119,9 +137,15 @@ var _stuck_t := 0.0
 var _hop_t := 0.0
 var _yaw := 0.0
 var _blend_t := -1.0
+var _blend_getup := false               ## First (crouch) stage of getting up.
+var _blend_pose := {}
 var _grace := 1.5                       ## Host: ignores hits while spawned props settle.
 var _blend_from: Array[Transform3D] = []
 var _blend_root := Transform3D()
+var _think := 0
+var _think_dt := 0.0
+var _lean := Vector2.ZERO               ## Seated lean: x = roll (about -Z), y = pitch (about X).
+var _lean_v := Vector2.ZERO
 
 
 func _init(w: World, p_role: String, extra: Dictionary) -> void:
@@ -141,7 +165,9 @@ func _init(w: World, p_role: String, extra: Dictionary) -> void:
 	_size = extra.get("size", 1.0)
 	_width = extra.get("width", 1.0)
 	_phase = randf() * 100.0
+	_think = randi() % THINK_EVERY
 	_look = NpcLook.new(extra, role)
+	_xf_buf.resize(LIMBS)
 
 
 func _ready() -> void:
@@ -149,10 +175,12 @@ func _ready() -> void:
 	add_to_group("grabbable")
 	collision_layer = Layers.NPC
 	collision_mask = Layers.WORLD | Layers.PLAYER | Layers.PROP | Layers.NPC
-	mass = 25.0
-	angular_damp = 1.5
+	mass = TORSO_MASS
+	angular_damp = 2.0
+	continuous_cd = true
 	var pm := PhysicsMaterial.new()
-	pm.friction = 0.4
+	pm.friction = 0.6
+	pm.bounce = 0.05
 	physics_material_override = pm
 	var s := _size
 	var torso := CollisionShape3D.new()
@@ -167,13 +195,20 @@ func _ready() -> void:
 	_legs_shape.shape = lc
 	_legs_shape.position.y = -(FEET + 0.25) * 0.5 * s
 	add_child(_legs_shape)
+	_head_shape = CollisionShape3D.new()
+	var hs := SphereShape3D.new()
+	hs.radius = 0.21 * s
+	_head_shape.shape = hs
+	_head_shape.position = _neck() + Vector3(0, 0.2 * s, 0)
+	add_child(_head_shape)
 	var vis := Node3D.new()
 	vis.scale = Vector3.ONE * s
 	add_child(vis)
 	_look.build_torso(vis)
+	_belt = _look.build_seatbelt(vis)
 	_build_limbs()
 	_build_bubble()
-	_pose = _target_pose()
+	_pose = _target_pose().duplicate()
 	if world.is_server():
 		_build_joints()
 		_build_hitbox()
@@ -188,33 +223,35 @@ func _ready() -> void:
 func _build_limbs() -> void:
 	var s := _size
 	var id: int = get_meta("net_id", 0)
+	var radii := [0.0, 0.075, 0.065, 0.075, 0.065, 0.1, 0.09, 0.1, 0.09]
+	var lengths := [0.0, 0.34, 0.4, 0.34, 0.4, 0.48, 0.48, 0.48, 0.48]
 	for i in LIMBS:
 		var p := Part.new()
 		p.npc = self
 		p.top_level = true
-		p.collision_layer = 0
-		p.collision_mask = 0
-		p.mass = LIMB_MASS[i]
-		p.angular_damp = 2.0
+		p.collision_layer = Layers.NPC
+		p.collision_mask = collision_mask
+		p.mass = LIMB_MASS[i] * s * s * s
+		p.angular_damp = 3.5
+		p.linear_damp = 0.05
+		p.continuous_cd = true
 		p.physics_material_override = physics_material_override
 		p.set_meta("net_id", id)
 		p.add_to_group("grabbable")
+		# Out of the physics space until posed (see _sync_limb_physics).
+		p.process_mode = Node.PROCESS_MODE_DISABLED
 		var cs := CollisionShape3D.new()
-		match i:
-			HEAD:
-				var sp := SphereShape3D.new()
-				sp.radius = 0.21 * s
-				cs.shape = sp
-			_:
-				var cap := CapsuleShape3D.new()
-				var dims: Vector2 = [Vector2.ZERO, Vector2(0.075, 0.34), Vector2(0.065, 0.4), Vector2(0.075, 0.34),
-					Vector2(0.065, 0.4), Vector2(0.1, 0.48), Vector2(0.09, 0.48), Vector2(0.1, 0.48),
-					Vector2(0.09, 0.48)][i]
-				cap.radius = dims.x * s
-				cap.height = dims.y * s
-				cs.shape = cap
-				if i == FORE_L or i == FORE_R or i == SHIN_L or i == SHIN_R:
-					cs.position.y = -0.04 * s
+		if i == HEAD:
+			var sp := SphereShape3D.new()
+			sp.radius = 0.21 * s
+			cs.shape = sp
+		else:
+			var cap := CapsuleShape3D.new()
+			cap.radius = float(radii[i]) * s
+			cap.height = float(lengths[i]) * s
+			cs.shape = cap
+			if i == FORE_L or i == FORE_R or i == SHIN_L or i == SHIN_R:
+				cs.position.y = -0.04 * s
 		p.add_child(cs)
 		var v := Node3D.new()
 		v.scale = Vector3.ONE * s
@@ -232,6 +269,7 @@ func _build_limbs() -> void:
 				_look.build_shin(v)
 		add_child(p)
 		_parts.append(p)
+	_limbs_physical = false
 	var bodies: Array[PhysicsBody3D] = [self]
 	bodies.append_array(_parts)
 	for a in bodies.size():
@@ -256,18 +294,19 @@ func _build_bubble() -> void:
 
 
 ## Joints sit at the rest-pose pivots (root-local). Limits are written in pose angles
-## (positive x swings a limb forward) and flipped into the joint's convention.
+## (positive x swings a limb forward) and flipped into the joint's convention. Elbows and
+## knees are hinges that only bend the natural way; the neck and hips stay within comfort.
 func _build_joints() -> void:
 	var s := _size
 	var specs := [
-		[HEAD, -1, _neck(), Vector3(-0.7, -0.9, -0.5), Vector3(0.6, 0.9, 0.5)],
-		[ARM_L, -1, _shoulder(-1.0), Vector3(-1.0, -0.5, -2.6), Vector3(2.9, 0.5, 0.3)],
-		[FORE_L, ARM_L, _shoulder(-1.0) + Vector3(0, -0.3 * s, 0), Vector3(0, -0.2, 0), Vector3(2.4, 0.2, 0)],
-		[ARM_R, -1, _shoulder(1.0), Vector3(-1.0, -0.5, -0.3), Vector3(2.9, 0.5, 2.6)],
-		[FORE_R, ARM_R, _shoulder(1.0) + Vector3(0, -0.3 * s, 0), Vector3(0, -0.2, 0), Vector3(2.4, 0.2, 0)],
-		[THIGH_L, -1, _hip(-1.0), Vector3(-0.6, -0.4, -0.9), Vector3(1.9, 0.4, 0.2)],
+		[HEAD, -1, _neck(), Vector3(-0.6, -0.9, -0.4), Vector3(0.5, 0.9, 0.4)],
+		[ARM_L, -1, _shoulder(-1.0), Vector3(-0.9, -0.5, -2.5), Vector3(2.8, 0.5, 0.25)],
+		[FORE_L, ARM_L, _shoulder(-1.0) + Vector3(0, -0.3 * s, 0), Vector3(0, -0.15, 0), Vector3(2.4, 0.15, 0)],
+		[ARM_R, -1, _shoulder(1.0), Vector3(-0.9, -0.5, -0.25), Vector3(2.8, 0.5, 2.5)],
+		[FORE_R, ARM_R, _shoulder(1.0) + Vector3(0, -0.3 * s, 0), Vector3(0, -0.15, 0), Vector3(2.4, 0.15, 0)],
+		[THIGH_L, -1, _hip(-1.0), Vector3(-0.5, -0.35, -0.8), Vector3(1.9, 0.35, 0.15)],
 		[SHIN_L, THIGH_L, _hip(-1.0) + Vector3(0, -0.42 * s, 0), Vector3(-2.4, 0, 0), Vector3.ZERO],
-		[THIGH_R, -1, _hip(1.0), Vector3(-0.6, -0.4, -0.2), Vector3(1.9, 0.4, 0.9)],
+		[THIGH_R, -1, _hip(1.0), Vector3(-0.5, -0.35, -0.15), Vector3(1.9, 0.35, 0.8)],
 		[SHIN_R, THIGH_R, _hip(1.0) + Vector3(0, -0.42 * s, 0), Vector3(-2.4, 0, 0), Vector3.ZERO],
 	]
 	for spec: Array in specs:
@@ -290,6 +329,7 @@ func _build_hitbox() -> void:
 	var area := Area3D.new()
 	area.collision_layer = 0
 	area.collision_mask = Layers.PROP | Layers.NPC
+	area.monitorable = false
 	var cs := CollisionShape3D.new()
 	var bx := BoxShape3D.new()
 	bx.size = Vector3(0.8 * _width, 1.9, 0.6) * _size
@@ -314,11 +354,10 @@ func _hip(sx: float) -> Vector3:
 	return Vector3(sx * 0.12 * _width, -0.33, 0) * _size
 
 
-## Root-local transforms of every limb for a pose.
+## Root-local transforms of every limb for a pose (written into a reused buffer).
 func _limb_xforms(p: Dictionary) -> Array[Transform3D]:
 	var s := _size
-	var out: Array[Transform3D] = []
-	out.resize(LIMBS)
+	var out := _xf_buf
 	out[HEAD] = Transform3D(Basis.from_euler(p.head), _neck()) * Transform3D(Basis(), Vector3(0, 0.2 * s, 0))
 	for side in 2:
 		var sx := -1.0 if side == 0 else 1.0
@@ -334,9 +373,18 @@ func _limb_xforms(p: Dictionary) -> Array[Transform3D]:
 	return out
 
 
-static func _rest_pose() -> Dictionary:
-	return {"head": Vector3.ZERO, "sh_l": Vector3.ZERO, "el_l": 0.0, "sh_r": Vector3.ZERO, "el_r": 0.0,
-		"hip_l": Vector3.ZERO, "kn_l": 0.0, "hip_r": Vector3.ZERO, "kn_r": 0.0, "lift": 0.0}
+static func _rest_pose(p := {}) -> Dictionary:
+	p.head = Vector3.ZERO
+	p.sh_l = Vector3.ZERO
+	p.el_l = 0.0
+	p.sh_r = Vector3.ZERO
+	p.el_r = 0.0
+	p.hip_l = Vector3.ZERO
+	p.kn_l = 0.0
+	p.hip_r = Vector3.ZERO
+	p.kn_r = 0.0
+	p.lift = 0.0
+	return p
 
 
 ## Arms: raise (forward swing), out (sideways, negative = inward), elbow bend, per side.
@@ -354,24 +402,36 @@ static func _legs(p: Dictionary, hl: float, kl: float, hr: float, kr: float, spr
 	p.kn_r = kr
 
 
-## The animated pose for the current state and reaction (all peers).
+## Squatting with hands on the knees: the first stage of getting up.
+static func _crouch_pose() -> Dictionary:
+	var p := _rest_pose()
+	_legs(p, 1.75, 2.25, 1.75, 2.25, 0.18)
+	_arms(p, 1.0, -0.15, 0.55, 1.0, -0.15, 0.55)
+	p.head = Vector3(0.3, 0, 0)
+	return p
+
+
+## The animated pose for the current state and reaction (all peers). Returns a reused buffer.
 func _target_pose() -> Dictionary:
 	var t := _anim_t + _phase
-	var p := _rest_pose()
+	var p := _rest_pose(_tgt)
 	match state:
 		State.SEATED:
-			_legs(p, PI / 2, 1.45, PI / 2, 1.45, 0.08)
+			# Shins angled so feet reach the floor; small people's feet dangle.
+			_legs(p, PI / 2, 1.4, PI / 2, 1.5, 0.1)
 			if role == "captain":
 				_arms(p, 1.15, -0.1, 0.35, 1.15, -0.1, 0.35)
 			else:
-				_arms(p, 0.55, -0.12, 0.95, 0.55, -0.12, 0.95)
+				_arms(p, 0.5, -0.1, 1.0, 0.5, -0.1, 1.0)
 				p.head = Vector3(sin(t * 0.4) * 0.08, sin(t * 0.3) * 0.25, 0)
 		State.STAND, State.WALK:
 			var gait := clampf(_speed_vis / WALK_SPEED, 0.0, 1.2)
-			var sw := sin(t * 8.0) * 0.6 * gait
-			_legs(p, sw, maxf(0.0, -sw) * 1.2 + 0.05, -sw, maxf(0.0, sw) * 1.2 + 0.05)
+			var sw := sin(_gait) * 0.45 * gait
+			var lift := absf(cos(_gait)) * gait
+			_legs(p, sw, maxf(0.0, -sw) * 1.4 + 0.08 + lift * 0.15, -sw, maxf(0.0, sw) * 1.4 + 0.08 + lift * 0.15)
 			if gait > 0.2:
-				_arms(p, -sw * 0.8, 0.08, 0.35, sw * 0.8, 0.08, 0.35)
+				_arms(p, -sw * 0.9, 0.08, 0.4, sw * 0.9, 0.08, 0.4)
+				p.head = Vector3(0.05, 0, sin(_gait) * 0.05)
 			else:
 				_arms(p, 0.45, -0.35, 1.3, 0.45, -0.35, 1.3)
 				p.head = Vector3(0, sin(t * 0.5) * 0.3, 0)
@@ -421,7 +481,7 @@ func _smooth_pose(dt: float) -> void:
 			_pose[key] = lerpf(float(_pose.get(key, v)), v, k)
 
 
-## Snaps the kinematic limbs onto the current pose around the root.
+## Snaps the posed limbs onto the current pose around the root.
 func _place_limbs() -> void:
 	if not is_inside_tree():
 		return
@@ -430,10 +490,19 @@ func _place_limbs() -> void:
 		var root := global_transform
 		for i in LIMBS:
 			_parts[i].global_transform = root * xf[i]
-	if _parts[0].collision_layer == 0:
-		for p in _parts:
-			p.collision_layer = Layers.NPC
-			p.collision_mask = collision_mask
+	_sync_limb_physics()
+
+
+## Limb bodies only take part in physics while they are simulated or streamed (_active);
+## otherwise they are removed from the space and the root's head shape covers the head.
+func _sync_limb_physics() -> void:
+	if _limbs_physical == _active:
+		return
+	_limbs_physical = _active
+	var mode := Node.PROCESS_MODE_INHERIT if _active else Node.PROCESS_MODE_DISABLED
+	for p in _parts:
+		p.process_mode = mode
+	_head_shape.set_deferred("disabled", _active)
 
 
 # --- Every peer: cosmetics ---------------------------------------------------------------
@@ -442,13 +511,20 @@ func _process(dt: float) -> void:
 	_anim_t += dt
 	var moved := global_position - _last_pos
 	_last_pos = global_position
-	_speed_vis = lerpf(_speed_vis, Vector2(moved.x, moved.z).length() / maxf(dt, 0.001), clampf(dt * 8.0, 0.0, 1.0))
-	if not world.is_server() and not _active:
-		_smooth_pose(dt)
-		_place_limbs()
-	var head := _parts[HEAD]
+	var speed := Vector2(moved.x, moved.z).length() / maxf(dt, 0.001)
+	if speed > 6.0:
+		speed = 0.0   # Teleports and snapshot catch-up are not walking.
+	_speed_vis = lerpf(_speed_vis, speed, clampf(dt * 8.0, 0.0, 1.0))
+	_gait = fmod(_gait + _speed_vis * dt * STRIDE / maxf(_size, 0.5), TAU)
+	if not world.is_server():
+		if not _active:
+			_smooth_pose(dt)
+			_place_limbs()
+		else:
+			_sync_limb_physics()
+	_belt.visible = state == State.SEATED and role == "passenger"
 	if _bubble.visible:
-		_bubble.global_position = head.global_position + Vector3(0, 0.5 * _size, 0)
+		_bubble.global_position = _parts[HEAD].global_position + Vector3(0, 0.5 * _size, 0)
 		_bubble_t -= dt
 		if _bubble_t <= 0.0:
 			_bubble.visible = false
@@ -544,6 +620,8 @@ func _apply_physics() -> void:
 	var limp := state == State.RAGDOLL or state == State.CARRIED or state == State.OUT
 	if limp:
 		_blend_t = -1.0
+		_active = true
+		_sync_limb_physics()
 		if freeze:
 			# Kinematic moves would otherwise turn into huge velocities on release.
 			freeze = false
@@ -552,7 +630,6 @@ func _apply_physics() -> void:
 		lock_rotation = false
 		_attach_joints()
 		_legs_shape.set_deferred("disabled", true)
-		_active = true
 		return
 	_detach_joints()
 	for p in _parts:
@@ -564,8 +641,9 @@ func _apply_physics() -> void:
 	freeze = state == State.SEATED or _blend_t >= 0.0
 	if was_frozen and not freeze:
 		linear_velocity = Vector3.ZERO
-	_legs_shape.set_deferred("disabled", state == State.SEATED)
+	_legs_shape.set_deferred("disabled", state == State.SEATED or _blend_t >= 0.0)
 	_active = _blend_t >= 0.0
+	_sync_limb_physics()
 
 
 ## Joins the limbs to the torso with frames taken from the rest pose, then lets them go.
@@ -604,19 +682,25 @@ func _physics_process(dt: float) -> void:
 	if not world.is_server():
 		return
 	_grace -= dt
+	_think_dt += dt
+	var think := (Engine.get_physics_frames() + _think) % THINK_EVERY == 0
 	if _blend_t >= 0.0:
 		_step_blend(dt)
 		return
 	match state:
 		State.SEATED:
+			_update_lean(dt)
 			global_transform = _seat_xform()
-			_check_suction()
+			if think:
+				_check_suction()
 		State.STAND:
 			_stand(dt)
-			_check_suction()
+			if think:
+				_check_suction()
 		State.WALK:
 			_walk_to_seat(dt)
-			_check_suction()
+			if think:
+				_check_suction()
 		State.RAGDOLL:
 			_timer -= dt
 			if _timer <= 0.0 and linear_velocity.length() < 1.5:
@@ -626,7 +710,9 @@ func _physics_process(dt: float) -> void:
 			if _timer <= 0.0:
 				_timer = randf_range(12.0, 25.0)
 				say_line(MUMBLES.pick_random())
-	_update_panic(dt)
+	if think:
+		_update_panic(_think_dt)
+		_think_dt = 0.0
 	if not _active:
 		_smooth_pose(dt)
 		_place_limbs()
@@ -664,9 +750,26 @@ func _pick_react() -> React:
 	return options.pick_random()
 
 
+## Host. Seated bodies lean with the felt gravity on a springy waist (bigger people sway
+## slower), and turbulence bumps jolt them. Clients see it through the synced root.
+func _update_lean(dt: float) -> void:
+	var g := world.plane.global_basis.inverse() * world.flight.felt_accel
+	var down := maxf(-g.y, 1.0)
+	var target := Vector2(atan2(g.x, down), atan2(g.z, down)) * LEAN_GAIN
+	var stiff := 38.0 / _size
+	_lean_v += ((target - _lean) * stiff - _lean_v * 5.5) * dt
+	var bump := absf(world.flight.bump)
+	if bump > 0.05:
+		_lean_v += Vector2(randf_range(-1.0, 1.0), randf_range(-1.0, 1.0)) * bump * 6.0 * dt
+	_lean = (_lean + _lean_v * dt).clamp(-Vector2.ONE * LEAN_MAX, Vector2.ONE * LEAN_MAX)
+
+
+## Root transform on the seat, leaning about the hips.
 func _seat_xform() -> Transform3D:
 	var lift := float(_pose.get("lift", 0.0))
-	return world.plane.global_transform * Transform3D(Basis(), seat + Vector3(0, (SEAT_LIFT + lift) * _size, 0))
+	var lean := Basis(Vector3.BACK, -_lean.x) * Basis(Vector3.RIGHT, _lean.y)
+	var up := lean * Vector3(0, (SEAT_LIFT + lift) * _size, 0)
+	return world.plane.global_transform * Transform3D(lean, seat + up)
 
 
 ## Host. A strong decompression pull rips people out of their seats.
@@ -687,9 +790,9 @@ func _stand(dt: float) -> void:
 	var local := world.plane.to_local(global_position)
 	var to := Vector3(home.x - local.x, 0, home.z - local.z)
 	if to.length() > 0.4:
-		_steer(world.plane.global_basis * to.normalized() * WALK_SPEED, dt)
+		_steer(world.plane.global_basis * to.normalized() * WALK_SPEED * clampf(to.length() * 1.5, 0.4, 1.0), dt)
 	else:
-		_yaw = PI
+		_face_yaw(PI, dt)
 		_steer(Vector3.ZERO, dt)
 		_hop_t -= dt
 		if scared and _hop_t <= 0.0:
@@ -697,26 +800,34 @@ func _stand(dt: float) -> void:
 			linear_velocity += world.plane.global_basis.y * 2.5
 
 
+## Host. Back to the seat: out to the aisle, along it to the seat's row, then sideways
+## along the row to stand in front of the seat, and sit down.
 func _walk_to_seat(dt: float) -> void:
 	var local := world.plane.to_local(global_position)
-	var at_seat := Vector2(local.x - seat.x, local.z - seat.z).length() < 0.7
-	var in_row := absf(local.x) < 0.45 and absf(local.z - seat.z) < 0.35
-	if at_seat or in_row or _stuck_t > 6.0:
+	var front := Vector3(seat.x, 0, seat.z - ROW_FRONT)
+	var off := Vector2(local.x - front.x, local.z - front.z)
+	if off.length() < 0.3 or _stuck_t > 6.0:
 		_start_blend(State.SEATED)
 		return
-	var target := Vector3(0, 0, seat.z) if absf(local.x) < 0.4 or absf(local.z - seat.z) < 0.4 \
-		else Vector3(0, 0, local.z)
+	var target: Vector3
+	if absf(local.z - front.z) < 0.25:
+		target = front
+	elif absf(local.x) < AISLE_HALF:
+		target = Vector3(clampf(local.x, -0.3, 0.3), 0, front.z)
+	else:
+		target = Vector3(0, 0, local.z)
 	var to := Vector3(target.x - local.x, 0, target.z - local.z)
-	_steer(world.plane.global_basis * to.normalized() * WALK_SPEED, dt)
+	var slow := clampf(to.length() * 2.0, 0.35, 1.0)
+	_steer(world.plane.global_basis * to.normalized() * WALK_SPEED * slow, dt)
 
 
-## Limited-force steering along the floor (tilts still win) with upright facing.
+## Limited-force steering along the floor (tilts still win) with smoothly turning facing.
 func _steer(want: Vector3, dt: float) -> void:
 	var up := world.plane.global_basis.y
 	var vh := linear_velocity - up * linear_velocity.dot(up)
 	apply_central_force(((want - vh) * 8.0).limit_length(MOVE_ACCEL) * mass)
 	if want.length() > 0.1:
-		_yaw = atan2(-want.x, -want.z)
+		_face_yaw(atan2(-want.x, -want.z), dt)
 		if vh.length() < 0.3:
 			_stuck_t += dt
 			if fmod(_stuck_t, 2.0) < dt:
@@ -726,7 +837,11 @@ func _steer(want: Vector3, dt: float) -> void:
 	global_basis = Basis(Vector3.UP, _yaw)
 
 
-## Host. Stands up from a ragdoll where the body lies.
+func _face_yaw(target: float, dt: float) -> void:
+	_yaw = lerp_angle(_yaw, target, clampf(dt * 8.0, 0.0, 1.0))
+
+
+## Host. Gets up from a ragdoll where the body lies.
 func _recover() -> void:
 	var space := get_world_3d().direct_space_state
 	var q := PhysicsRayQueryParameters3D.create(global_position + Vector3.UP * 0.3,
@@ -746,31 +861,60 @@ func _recover() -> void:
 
 
 ## Host. Kinematically blends root and limbs from where they are to the target state's pose.
+## Getting up from the floor goes through a crouch first.
 func _start_blend(target: State, root_target := Transform3D()) -> void:
+	var from_floor := state == State.RAGDOLL or state == State.OUT
+	_blend_capture()
+	_blend_root = root_target
+	_blend_t = 0.0
+	state = target
+	_blend_getup = from_floor and target != State.SEATED
+	_speed_vis = 0.0
+	_lean = Vector2.ZERO
+	_lean_v = Vector2.ZERO
+	_pose = (_crouch_pose() if _blend_getup else _target_pose()).duplicate()
+	_blend_pose = _pose
+	_apply_physics()
+	_sync()
+
+
+func _blend_capture() -> void:
 	_blend_from.clear()
 	_blend_from.append(global_transform)
 	for p in _parts:
 		_blend_from.append(p.global_transform)
-	_blend_root = root_target
-	_blend_t = 0.0
-	state = target
-	_pose = _target_pose()
-	_apply_physics()
-	_sync()
+
+
+func _blend_target() -> Transform3D:
+	if state == State.SEATED:
+		return _seat_xform()
+	if _blend_getup:
+		var crouch := Basis(Vector3.UP, _yaw) * Basis(Vector3.RIGHT, -0.45)
+		return Transform3D(crouch, _blend_root.origin + Vector3.DOWN * CROUCH_DROP * _size)
+	return _blend_root
 
 
 func _step_blend(dt: float) -> void:
 	_blend_t += dt / BLEND_TIME
 	var k := smoothstep(0.0, 1.0, minf(_blend_t, 1.0))
-	var root_to := _seat_xform() if state == State.SEATED else _blend_root
+	var root_to := _blend_target()
 	global_transform = _blend_from[0].interpolate_with(root_to, k)
-	var xf := _limb_xforms(_pose)
+	var xf := _limb_xforms(_blend_pose)
 	for i in LIMBS:
 		_parts[i].global_transform = _blend_from[i + 1].interpolate_with(root_to * xf[i], k)
-	if _blend_t >= 1.0:
-		_blend_t = -1.0
-		_apply_physics()
-		_sync()
+	if _blend_t < 1.0:
+		return
+	if _blend_getup:
+		# Second stage: push up from the crouch to standing.
+		_blend_getup = false
+		_blend_capture()
+		_blend_t = 0.0
+		_pose = _target_pose().duplicate()
+		_blend_pose = _pose
+		return
+	_blend_t = -1.0
+	_apply_physics()
+	_sync()
 
 
 ## Host. Knocks this person over for `duration` seconds (unconscious people just get shoved).
@@ -816,13 +960,12 @@ func wake_up(line: String) -> void:
 	if state == State.OUT:
 		_unconscious = true
 		return
-	_timer = 4.5
+	_timer = 4.5 + BLEND_TIME * 2.0
 	say_line(line)
 
 
 func _on_hit(body: Node3D) -> void:
 	var rb := body as RigidBody3D
-
 	if rb == null or rb == self or _parts.has(rb) or state == State.CARRIED or _grace > 0.0 or rb.freeze:
 		return
 	var rel := rb.linear_velocity - (Vector3.ZERO if freeze else linear_velocity)
