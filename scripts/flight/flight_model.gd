@@ -199,7 +199,7 @@ func _fly(dt: float) -> void:
 
 ## Apparent gravity in the cabin: real gravity minus (part of) the plane's acceleration.
 func _update_felt(accel: Vector3, b: Basis) -> void:
-	var world_felt := Vector3(0, -GRAVITY, 0) - (accel + Vector3(0, GRAVITY, 0)) * FELT_COUPLING
+	var world_felt := Vector3(0, -GRAVITY, 0) - accel * FELT_COUPLING   # accel already includes gravity.
 	world_felt.y -= bump * GRAVITY
 	felt_accel = Basis(Vector3.UP, -yaw) * world_felt
 	felt_g = world_felt.dot(-b.y) / GRAVITY

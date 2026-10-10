@@ -7,7 +7,7 @@ Godot 4.7, GDScript, Jolt physics. Everything is built from code (no art assets)
 - The **plane** (`Airliner`, `scripts/plane/airliner.gd`) is an `AnimatableBody3D` fixed at the world origin. It only pitches and rolls. Its local axes are: `-Z` = nose, `+X` = right wing, floor top at `y = 0`. The cockpit runs from `z -14` to `-10`, the cabin from `-10` to `6`, the lounge from `6` to `12` (`LOUNGE_MIN`/`LOUNGE_MAX`) and the cargo hold from `12` to `22` (`CARGO_MIN`/`CARGO_MAX`, rear ramp at `TAIL_Z`). Collision uses invisible boxes. The visible hull is a CSG tube with real window and door cut-outs.
 - **Fixtures**: modules attach furniture to the moving plane with `plane.add_fixture(size, center, color, collide)`, `plane.add_mesh(mesh, xform)` and `plane.add_area(interactable)`.
 - The **outside world** (`scripts/outside/outside.gd`) is built in world coordinates (ground at `y = 0`, north = `-Z`). Each frame, `World` sets the `Outside` transform to the inverse of the plane's flight pose, so the scenery moves past the plane.
-- **Gravity is real.** Tilting the plane tilts the floor, so loose bodies and players slide. `World` also sets the physics space's gravity each frame to `9.8 * flight.felt_gravity()`, so a steep dive makes everything float.
+- **Gravity is real.** `FlightModel` is force-based (lift from angle of attack, drag, thrust, flaps, stall). It produces `felt_accel`: real gravity minus 60% of the plane's own acceleration, in the scene frame. `World` writes that vector into the physics space's gravity every frame. Banks, dives and pull-ups therefore make loose bodies and players slide, float or get pinned. `felt_gravity()` returns the scalar g along the cabin floor.
 - **Outside the hull**, the wind pushes toward the tail. `Airliner.is_outside(pos)` reports whether a position is outside. Anything farther than `World.LOSE_DISTANCE` from the origin is lost.
 
 ## Networking
@@ -24,10 +24,16 @@ The host (peer 1) is authoritative. It simulates `FlightModel`, every networked 
 | `world.say(speaker, text, dur)` | Subtitle on every screen (`subtitle` signal). |
 | `world.notify(peer, text)` | Toast for one player (`toast` signal on that peer). |
 | `world.push_player(peer, vel)` / `world.shake_all(amount)` | Knockback / camera shake. |
-| `world.repair_engine(i, amount)`, `world.add_stat(key, n)` | Engine power and round statistics. |
+| `world.damage_plane(part, amount)` | Plane damage. Parts: `engine0/1`, `wing0/1` (left/right), `tail`, `hull`. Health is kept in `plane.damage[part]` on every peer (1 = intact). A negative amount repairs. |
+| `world.damage_plane_at(pos, amount)` | Damages the part at a world point, breaks a window right there, leaves a scorch mark, and returns the part name. |
+| `world.add_stat(key, n)` | Round statistics. |
 | `world.request(action, args)` (any peer) | Sends an action to the host, which runs `handler(peer_id, args)`. |
 
 `world.locked_doors` is a host-side `{door_name: true}` map. The cockpit door starts locked.
+
+**Damage changes the flight.** Engine thrust follows engine health and drops while the engine burns, and the thrust asymmetry yaws and rolls the plane. A weak wing drops. A damaged tail wobbles and loses elevator authority. Hull damage adds drag. Fires burn down engine and wing health, and a wrecked engine (health < 0.3) can catch fire by itself.
+
+**Ragdolls.** An object can return limb bodies from `get_net_parts()`, in the same order on every peer. The host snapshots each part, and clients freeze the parts and follow them. While `net_parts_active()` returns false, only the root body is synced.
 
 ## Module contract
 

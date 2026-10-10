@@ -25,7 +25,7 @@ const STATE_INTERVAL := 1.0 / 30.0
 const PUNCH_COOLDOWN := 0.35
 const EYE_HEIGHT := 1.6
 const SEATED_EYE := 1.15
-const HAND_REST := Vector3(0.2, -0.22, -0.42)   ## Right arm rest pose in camera space.
+const HAND_REST := Vector3(0.22, -0.26, -0.52)   ## Right arm rest pose in camera space.
 const PILOT_EYE := 1.5      ## High enough to see over the dashboard.
 
 const COLORS := [Color(0.95, 0.35, 0.3), Color(0.3, 0.6, 0.95), Color(0.35, 0.85, 0.4),
@@ -164,11 +164,11 @@ func _build_hands(color: Color) -> void:
 	_hands = Node3D.new()
 	camera.add_child(_hands)
 	var skin := Color(0.96, 0.8, 0.65)
-	_hand_l = _part(_capsule(0.04, 0.32), Vector3(-HAND_REST.x, HAND_REST.y, HAND_REST.z), color, _hands, Vector3(-PI / 2, 0, 0))
-	_hand_r = _part(_capsule(0.04, 0.32), HAND_REST, color, _hands, Vector3(-PI / 2, 0, 0))
+	_hand_l = _part(_capsule(0.03, 0.24), Vector3(-HAND_REST.x, HAND_REST.y, HAND_REST.z), color, _hands, Vector3(-PI / 2, 0, 0))
+	_hand_r = _part(_capsule(0.03, 0.24), HAND_REST, color, _hands, Vector3(-PI / 2, 0, 0))
 	for h in [_hand_l, _hand_r]:
-		_part(_ball(0.05), Vector3(0, 0.18, 0), skin, h)          # Fist (capsule's +Y points forward).
-		_part(_capsule(0.047, 0.1), Vector3(0, 0.08, 0), Color.WHITE, h)   # Cuff.
+		_part(_ball(0.038), Vector3(0, 0.135, 0), skin, h)          # Fist (capsule's +Y points forward).
+		_part(_capsule(0.035, 0.07), Vector3(0, 0.06, 0), Color.WHITE, h)   # Cuff.
 		h.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 
