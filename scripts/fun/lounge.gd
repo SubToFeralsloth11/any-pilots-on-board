@@ -67,6 +67,7 @@ static func _booth(plane: Airliner, root: Node3D, z: float) -> void:
 			var seat := Interactable.make(Vector3(0.4, 0.4, 0.4), "Sit in the booth [E]", "sit")
 			seat.local_only = true
 			seat.set_meta("seat", Vector3(x0 + sx + 0.1, 0.5, bz))
+			seat.set_meta("seat_yaw", 0.0 if s > 0.0 else PI)   # Each bench faces the table.
 			seat.position = Vector3(x0 + sx + 0.1, 0.62, bz)
 			plane.add_area(seat)
 	# Little table lamp with a fringed shade.
@@ -124,6 +125,7 @@ static func _bar(plane: Airliner, root: Node3D) -> void:
 		var seat := Interactable.make(Vector3(0.34, 0.3, 0.34), "Sit at the bar [E]", "sit")
 		seat.local_only = true
 		seat.set_meta("seat", base + Vector3(0, 0.78, 0))
+		seat.set_meta("seat_yaw", -PI / 2)   # Facing the bar counter (+X).
 		seat.position = base + Vector3(0, 0.85, 0)
 		plane.add_area(seat)
 	# Countertop clutter: a cocktail with an umbrella and a tip jar.

@@ -45,7 +45,8 @@ var world: World
 var is_local := false
 var look_pitch := 0.0
 var held_id := 0
-## Set by World on every peer. Entering faces the windshield; leaving drops you beside the seat.
+## Set by World on every peer. Entering faces the windshield in first person; leaving drops
+## you beside the seat and restores the camera mode you had before sitting down.
 var piloting := false:
 	set(value):
 		if value == piloting:
@@ -55,6 +56,8 @@ var piloting := false:
 			return
 		seated = false
 		if value:
+			_third_before_seat = _third_person
+			seat_yaw = 0.0
 			rotation.y = 0.0
 			look_pitch = 0.0
 			head.rotation.x = 0.0
@@ -62,8 +65,14 @@ var piloting := false:
 		else:
 			global_position = world.plane.to_global(Airliner.PILOT_SEAT + Vector3(0.6, -0.4, 0.4))
 			_shape.set_deferred("disabled", false)
-			_set_camera_mode(false)
+			_set_camera_mode(not _third_before_seat)
 
+## How far a seated or piloting player may turn their head away from the seat's facing (rad).
+const SEATED_YAW_LIMIT := 1.75
+const SEATED_PITCH_LIMIT := 1.1
+
+var seat_yaw := 0.0              ## World yaw the current seat faces (seated or piloting).
+var _third_before_seat := false
 var seated := false
 var seat_local := Vector3.ZERO
 var crouching := false
@@ -149,7 +158,9 @@ func _ready() -> void:
 		head.add_child(camera)
 		camera.current = true
 		
+		# World-space ray re-aimed every frame from whichever camera is active (see _update_aim).
 		ray = RayCast3D.new()
+		ray.top_level = true
 		ray.target_position = Vector3(0, 0, -REACH)
 		ray.collision_mask = Layers.WORLD | Layers.PLAYER | Layers.PROP | Layers.NPC | Layers.INTERACT
 		ray.collide_with_areas = true
@@ -217,23 +228,24 @@ func _set_camera_mode(first_person: bool) -> void:
 		_tp_parts.body_vis.visible = not first_person
 	if _tp_parts and _tp_parts.label:
 		_tp_parts.label.visible = not first_person
-	# Ray always from active camera
-	if ray:
-		ray.set_parent(camera if first_person else _tp_camera)
-	ray.add_exception(self)
 
 
 # --- Input -------------------------------------------------------------------------------
-	var target_eye = EYE_HEIGHT - (0.5 if crouching else 0.0)
+
 func _unhandled_input(event: InputEvent) -> void:
 	if not is_local or world.input_blocked() or respawning:
 		return
-	
+
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		var sens = MOUSE_SENS * _mouse_sens_mult
 		rotate_y(-event.relative.x * sens)
 		var pitch_delta = event.relative.y * sens * (1.0 if _invert_y else -1.0)
-		look_pitch = clampf(look_pitch + pitch_delta, -1.5, 1.5)
+		var pitch_limit := SEATED_PITCH_LIMIT if (seated or piloting) else 1.5
+		look_pitch = clampf(look_pitch + pitch_delta, -pitch_limit, pitch_limit)
+		if seated or piloting:
+			# Belted in: the body faces the seat; the head turns sideways but not round.
+			var off := clampf(angle_difference(seat_yaw, rotation.y), -SEATED_YAW_LIMIT, SEATED_YAW_LIMIT)
+			rotation.y = seat_yaw + off
 		head.rotation.x = look_pitch
 		# In third person, rotate the boom yaw with the player, pitch with look
 		if _third_person and _cam_boom:
@@ -258,7 +270,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		_set_camera_mode(!_third_person)
 	elif event.is_action_pressed("ping"):
 		_try_ping()
-	elif event.is_action_just_pressed("jump"):
+	elif event.is_action_pressed("jump", false):
+		# Buffered so a press just before landing still jumps (see _move).
 		_jump_buffer_t = JUMP_BUFFER
 
 
@@ -460,20 +473,41 @@ func _update_camera_boom(dt: float) -> void:
 
 # --- Seating -----------------------------------------------------------------------------
 
-func sit(seat: Vector3) -> void:
+## Sits in a seat (plane-local seat point) facing `yaw` (0 = toward the nose). Refuses
+## seats someone else already occupies and says so.
+func sit(seat: Vector3, yaw := 0.0) -> void:
+	if seat_taken(seat):
+		world.toast.emit("Someone's already sitting there.")
+		return
 	seated = true
 	seat_local = seat
+	seat_yaw = yaw
 	_shape.set_deferred("disabled", true)
-	rotation.y = 0.0
+	rotation.y = yaw
+	look_pitch = 0.0
+	head.rotation.x = 0.0
 	ext_vel = Vector3.ZERO
 	_move_vel = Vector3.ZERO
 
 
+## Gets up and steps out in front of the seat (on the floor, clear of the seat's collider).
 func stand() -> void:
 	if seated:
-		global_position = world.plane.to_global(seat_local + Vector3(0, 0.05, 0))
+		var ahead := Basis(Vector3.UP, seat_yaw) * Vector3(0, 0, -0.6)
+		global_position = world.plane.to_global(Vector3(seat_local.x, 0.05, seat_local.z) + ahead)
 	seated = false
+	_jump_buffer_t = 0.0
 	_shape.set_deferred("disabled", false)
+
+
+## True when another player or a passenger occupies the plane-local seat point.
+func seat_taken(seat: Vector3) -> bool:
+	var sit_at := world.plane.to_global(seat - Vector3(0, 0.45, 0))
+	for id in world.players:
+		var other: Player = world.players[id]
+		if other != self and (other.seated or other.piloting) and other.global_position.distance_to(sit_at) < 0.35:
+			return true
+	return world.npcs != null and world.npcs.has_method("is_seat_taken") and world.npcs.is_seat_taken(seat)
 
 
 func _stick_to_seat(dt: float) -> void:
@@ -546,8 +580,10 @@ func _update_aim() -> void:
 	var cam = _tp_camera if _third_person else camera
 	if not cam or not ray:
 		return
-	ray.global_position = cam.global_position
-	ray.target_position = cam.global_position - cam.global_basis.z * REACH
+	# In third person the camera sits behind the head, so the ray reaches that much further.
+	var reach: float = REACH + (cam as Camera3D).global_position.distance_to(head.global_position)
+	ray.global_transform = Transform3D(cam.global_basis, cam.global_position)
+	ray.target_position = Vector3(0, 0, -reach)
 	ray.force_raycast_update()
 	if not ray.is_colliding():
 		aim_prompt = "Drop [E]  Throw [LMB]  Use [RMB]" if held_id else ""
@@ -555,7 +591,11 @@ func _update_aim() -> void:
 	var c := ray.get_collider()
 	if c is Interactable:
 		_aim = {"type": "area", "node": c}
-		aim_prompt = (c as Interactable).get_prompt()
+		var a := c as Interactable
+		if a.action == "sit" and a.has_meta("seat") and seat_taken(a.get_meta("seat")):
+			aim_prompt = "Seat taken"
+		else:
+			aim_prompt = a.get_prompt()
 	elif c is Player:
 		_aim = {"type": "player", "peer": (c as Player).peer_id}
 		aim_prompt = "Shove %s [LMB]" % (c as Player).display_name
@@ -572,6 +612,8 @@ func _update_aim() -> void:
 			aim_prompt = "Pick up [E]"
 	if held_id:
 		aim_prompt = "Drop [E]  Throw [LMB]  Use [RMB]"
+	elif seated:
+		aim_prompt = "Get up [E]"
 
 
 func _on_interact() -> void:
@@ -581,6 +623,9 @@ func _on_interact() -> void:
 	if held_id:
 		world.request("drop")
 		return
+	if seated:
+		stand()
+		return
 	match _aim.get("type", ""):
 		"area":
 			var a: Interactable = _aim.node
@@ -588,7 +633,7 @@ func _on_interact() -> void:
 				return
 			if a.local_only:
 				if a.action == "sit" and a.has_meta("seat"):
-					sit(a.get_meta("seat"))
+					sit(a.get_meta("seat"), float(a.get_meta("seat_yaw", 0.0)))
 				a.used.emit(self)
 			else:
 				world.request(a.action, a.args)
