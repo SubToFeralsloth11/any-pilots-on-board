@@ -17,39 +17,57 @@ const MAST_HEIGHT := 140.0
 const MAST_POS := Vector3(380, 0, 560)
 ## 7-segment digits for runway numbers: segments a..g.
 const DIGITS := {"1": "bc", "3": "abcdg", "6": "acdefg", "8": "abcdefg"}
+const DETAIL_NEAR := 3000.0   ## Parked planes and apron vehicles fade out beyond this (at High).
 
 var _rabbit: MeshInstance3D
 var _beacon: MeshInstance3D
 var _beam_mat: StandardMaterial3D
 var _t := 0.0
+var _mesh: MeshInstance3D
+var _detail: MeshInstance3D
 
 
 func _ready() -> void:
 	var b := Blocks.new()
+	var detail := Blocks.new()
 	var glow := Blocks.new()
 	_build_surfaces(b)
 	_build_markings(b)
 	_build_lights(b, glow)
 	_build_buildings(b)
-	_build_planes(b)
+	_build_vehicles(detail)
+	_build_planes(detail)
 	_build_mast(b)
-	var mi := MeshInstance3D.new()
-	mi.name = "AirportMesh"
-	mi.mesh = b.commit()
-	mi.material_override = Blocks.vertex_material()
-	add_child(mi)
-	var lights := MeshInstance3D.new()
-	lights.name = "AirportLights"
-	lights.mesh = glow.commit()
+	var mat := Blocks.vertex_material()
+	_mesh = _mesh_instance("AirportMesh", b, mat)
+	_detail = _mesh_instance("AirportDetail", detail, mat)
 	var lm := Blocks.glow_material(Color.WHITE)
 	lm.vertex_color_use_as_albedo = true
 	lm.vertex_color_is_srgb = true
-	lights.material_override = lm
+	var lights := _mesh_instance("AirportLights", glow, lm)
 	lights.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	add_child(lights)
 	_build_beacon()
 	_build_signs()
 	_build_collision()
+	Settings.changed.connect(_apply_quality)
+	_apply_quality()
+
+
+func _mesh_instance(node_name: String, b: Blocks, mat: Material) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	mi.name = node_name
+	mi.mesh = b.commit()
+	mi.material_override = mat
+	add_child(mi)
+	return mi
+
+
+## Shadows follow the quality setting; small apron detail fades out with distance.
+func _apply_quality() -> void:
+	var cast := GeometryInstance3D.SHADOW_CASTING_SETTING_ON if Settings.shadows() else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_mesh.cast_shadow = cast
+	_detail.cast_shadow = cast
+	Blocks.fade_out(_detail, DETAIL_NEAR)
 
 
 func _process(dt: float) -> void:
@@ -195,7 +213,6 @@ func _build_buildings(b: Blocks) -> void:
 		var r := 1.3 - k * 0.22
 		b.cylinder(Vector3.ZERO, r, r - 0.2, 2.6, Color(1.0, 0.45, 0.1) if k % 2 == 0 else Color(1, 1, 1),
 			Blocks.axis_xf(Vector3(-90, 11, 620.3 + k * 2.6), Vector3.BACK), 8, false)
-	_build_vehicles(b)
 
 
 ## Terminal: glass curtain wall with mullions, orange roof trim, rooftop units and jet bridges.

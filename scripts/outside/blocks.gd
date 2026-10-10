@@ -8,6 +8,9 @@ const AXES := [
 	[Vector3.BACK, Vector3.RIGHT, Vector3.UP], [Vector3.FORWARD, Vector3.UP, Vector3.RIGHT],
 ]
 
+## Near-detail draw distance multiplier per Settings.quality (Low, Medium, High).
+const LOD_SCALE := [0.55, 0.75, 1.0]
+
 var _st := SurfaceTool.new()
 var _count := 0
 
@@ -17,12 +20,22 @@ func _init() -> void:
 
 
 ## Shared opaque material that takes its colour from the vertices (and MultiMesh tints).
+## Matte with no specular lobe: cartoon look, and cheaper for thousands of trees.
 static func vertex_material() -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
 	m.vertex_color_use_as_albedo = true
 	m.vertex_color_is_srgb = true
 	m.roughness = 0.95
+	m.specular_mode = BaseMaterial3D.SPECULAR_DISABLED
 	return m
+
+
+## Fades `gi` out beyond `distance` metres (scaled by the quality setting); fog hides the pop.
+static func fade_out(gi: GeometryInstance3D, distance: float) -> void:
+	var r: float = distance * LOD_SCALE[Settings.quality]
+	gi.visibility_range_end = r
+	gi.visibility_range_end_margin = r * 0.15
+	gi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 
 
 ## Bright unlit material for lights; fog never dims it so it reads from far away.
@@ -208,6 +221,20 @@ static func axis_xf(origin: Vector3, dir: Vector3) -> Transform3D:
 	var side := Vector3.RIGHT if absf(up.x) < 0.9 else Vector3.FORWARD
 	var z := side.cross(up).normalized()
 	return Transform3D(Basis(up.cross(z).normalized(), up, z), origin)
+
+
+## Bakes a copy of a committed Blocks mesh (its surface arrays) at `xf`, tinted by `tint`.
+## Lets many tiny far-LOD instances share one draw call with the rest of the landscape.
+func instance(arrays: Array, xf: Transform3D, tint: Color) -> void:
+	var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	var norms: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
+	var cols: PackedColorArray = arrays[Mesh.ARRAY_COLOR]
+	var nm := xf.basis.inverse().transposed()
+	for i in verts.size():
+		_st.set_color(cols[i] * tint)
+		_st.set_normal((nm * norms[i]).normalized())
+		_st.add_vertex(xf * verts[i])
+	_count += verts.size() / 3
 
 
 ## Thin double-sided triangle (sails, flags).

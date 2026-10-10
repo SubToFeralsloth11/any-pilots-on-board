@@ -5,6 +5,11 @@ extends Node3D
 ## crash into), boxy clouds and the airport. Everything is seeded, so every peer sees the same
 ## landscape. Static scenery is baked into a handful of vertex-coloured meshes and MultiMeshes,
 ## all sharing one material. Also plays the crash explosion when a round ends badly.
+##
+## Level of detail: trees, cows and village details are bucketed into TILE-sized chunks that fade
+## out with distance (Blocks.fade_out, scaled by Settings.quality). Trees and buildings also have
+## a tiny far version, baked into the single landscape mesh, that always draws and sits *inside*
+## the detailed one, so nothing pops or z-fights; haze (fog + aerial perspective) hides the swap.
 
 const Blocks := preload("res://scripts/outside/blocks.gd")
 const Airport := preload("res://scripts/outside/airport.gd")
@@ -12,9 +17,18 @@ const CrashFx := preload("res://scripts/outside/crash_fx.gd")
 
 const SEED := 7031
 const GROUND_SIZE := 120000.0
+const GROUND_CELL := 4000.0                  ## Far patchwork cells outside the detailed region.
 const AREA_MIN := Vector2(-9000, -22000)   ## Detailed scenery region (x, z).
 const AREA_MAX := Vector2(11000, 7000)
 const CELL := 420.0                          ## Farm field grid.
+const TILE := 600.0                          ## LOD chunk size for near-detail scenery.
+## Near-detail fade distances (metres, at quality High).
+const TREE_NEAR := 1500.0
+const COW_NEAR := 800.0
+const VILLAGE_NEAR := 2600.0
+## Sun shadow distance and atlas size per Settings.quality (Low has no shadows).
+const SHADOW_DIST := [0.0, 90.0, 150.0]
+const SHADOW_ATLAS := [1024, 2048, 4096]
 ## Lakes: [center, radius].
 const LAKES := [
 	[Vector3(-1800, 0, -1500), 520.0],
@@ -36,12 +50,16 @@ const FIELD_COLORS := [
 	Color(0.78, 0.86, 0.38), Color(0.98, 0.66, 0.25), Color(0.7, 0.55, 0.85), Color(0.45, 0.75, 0.5),
 ]
 const GRASS := Color(0.42, 0.7, 0.3)
+## Far-away countryside tints, mixed into the grass patchwork beyond the detailed region.
+const FAR_TINTS := [Color(0.42, 0.7, 0.3), Color(0.5, 0.74, 0.32), Color(0.36, 0.62, 0.28),
+	Color(0.62, 0.72, 0.36), Color(0.46, 0.66, 0.36), Color(0.7, 0.7, 0.4)]
 const ROAD := Color(0.36, 0.36, 0.4)
 const WATER := Color(0.25, 0.6, 0.95)
 const SAND := Color(0.93, 0.86, 0.6)
 const HOUSE_WALLS := [Color(0.98, 0.95, 0.85), Color(0.98, 0.85, 0.7), Color(0.8, 0.9, 1.0),
 	Color(1.0, 0.78, 0.8), Color(0.85, 0.95, 0.75)]
 const ROOFS := [Color(0.85, 0.25, 0.2), Color(0.6, 0.3, 0.2), Color(0.25, 0.4, 0.75), Color(0.3, 0.3, 0.35)]
+const HAZE := Color(0.7, 0.83, 0.97)
 
 var world: World
 var _rng := RandomNumberGenerator.new()
@@ -55,6 +73,10 @@ var _boats: Array[Dictionary] = []         ## {center: Vector3, radius: float, a
 var _boat_mm: MultiMesh
 var _balloon_pos: Array[Vector3] = []
 var _balloon_mm: MultiMesh
+var _env: Environment
+var _sun: DirectionalLight3D
+var _lod: Array[Dictionary] = []                    ## {node: GeometryInstance3D, range: float}
+var _shadow_casters: Array[GeometryInstance3D] = []  ## Cast shadows only when Settings.shadows().
 
 
 func _ready() -> void:
@@ -62,10 +84,13 @@ func _ready() -> void:
 	_rng.seed = SEED
 	_mat = Blocks.vertex_material()
 	_build_environment()
-	_build_ground()
-	_build_mountains()
-	_build_forests()
-	_build_villages()
+	# Ground, mountains, far trees and far buildings share one mesh and one draw call.
+	var land := Blocks.new()
+	_build_ground(land)
+	_build_mountains(land)
+	_build_forests(land)
+	_build_villages(land)
+	_add_static_mesh(land, "Landscape")
 	_build_clouds()
 	_build_life()
 	var airport := Airport.new()
@@ -75,6 +100,8 @@ func _ready() -> void:
 	_build_collision()
 	if world:
 		world.round_ended.connect(_on_round_ended)
+	Settings.changed.connect(_apply_quality)
+	_apply_quality()
 
 
 ## Moves the living details: cars, windmill rotors, boats and hot-air balloons.
@@ -104,48 +131,90 @@ func _process(dt: float) -> void:
 		_balloon_mm.set_instance_transform(i, Transform3D(Basis.IDENTITY, _balloon_pos[i] + bob))
 
 
+## Scales detail distances, shadows and post effects to the quality setting.
+func _apply_quality() -> void:
+	for e in _lod:
+		Blocks.fade_out(e.node, e.range)
+	var shadows := Settings.shadows()
+	for gi in _shadow_casters:
+		gi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if shadows else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_sun.shadow_enabled = shadows
+	# One orthogonal split: the cabin is all that's close, so a second cascade only doubles the
+	# shadow pass draw calls.
+	_sun.directional_shadow_mode = DirectionalLight3D.SHADOW_ORTHOGONAL
+	_sun.directional_shadow_max_distance = SHADOW_DIST[Settings.quality]
+	RenderingServer.directional_shadow_atlas_set_size(SHADOW_ATLAS[Settings.quality], true)
+	_env.glow_enabled = Settings.quality >= 1
+	(_env.sky.sky_material as ProceduralSkyMaterial).sky_cover_modulate.a = 0.55 if Settings.quality >= 1 else 0.0
+
+
 # --- Sky and light --------------------------------------------------------------------
+
+## Wispy high cirrus painted into the sky dome (additive, so it only brightens the blue).
+func _cirrus() -> NoiseTexture2D:
+	var noise := FastNoiseLite.new()
+	noise.seed = SEED
+	noise.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	noise.frequency = 0.006
+	noise.fractal_octaves = 4
+	var ramp := Gradient.new()
+	ramp.offsets = PackedFloat32Array([0.0, 0.55, 0.8])
+	ramp.colors = PackedColorArray([Color(1, 1, 1, 0), Color(1, 1, 1, 0), Color(1, 1, 1, 0.9)])
+	var tex := NoiseTexture2D.new()
+	tex.width = 1024
+	tex.height = 256
+	tex.seamless = true
+	tex.noise = noise
+	tex.color_ramp = ramp
+	return tex
+
 
 func _build_environment() -> void:
 	var sky_mat := ProceduralSkyMaterial.new()
-	sky_mat.sky_top_color = Color(0.2, 0.5, 0.95)
-	sky_mat.sky_horizon_color = Color(0.68, 0.85, 1.0)
-	sky_mat.sky_curve = 0.12
-	sky_mat.ground_horizon_color = Color(0.68, 0.85, 1.0)
-	sky_mat.ground_bottom_color = Color(0.55, 0.6, 0.6)
+	sky_mat.sky_top_color = Color(0.17, 0.45, 0.92)
+	sky_mat.sky_horizon_color = HAZE
+	sky_mat.sky_curve = 0.1
+	sky_mat.ground_horizon_color = HAZE
+	sky_mat.ground_bottom_color = Color(0.5, 0.62, 0.55)
+	sky_mat.ground_curve = 0.04
 	sky_mat.sun_angle_max = 20.0
-	var env := Environment.new()
-	env.background_mode = Environment.BG_SKY
-	env.sky = Sky.new()
-	env.sky.sky_material = sky_mat
+	sky_mat.sun_curve = 0.08
+	sky_mat.sky_cover = _cirrus()
+	sky_mat.sky_cover_modulate = Color(1, 1, 1, 0.55)
+	_env = Environment.new()
+	_env.background_mode = Environment.BG_SKY
+	_env.sky = Sky.new()
+	_env.sky.sky_material = sky_mat
+	_env.sky.radiance_size = Sky.RADIANCE_SIZE_64
 	# Neutral warm-white ambient so down-facing cabin surfaces don't pick up a green tint.
-	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = Color(0.78, 0.78, 0.82)
-	env.ambient_light_energy = 0.45
-	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
-	env.tonemap_exposure = 0.95
-	env.fog_enabled = true
-	env.fog_mode = Environment.FOG_MODE_EXPONENTIAL
-	env.fog_light_color = Color(0.72, 0.84, 0.97)
-	env.fog_density = 0.00002
-	env.fog_sky_affect = 0.0
-	env.glow_enabled = true
-	env.glow_intensity = 0.4
-	env.glow_hdr_threshold = 1.3
-	env.adjustment_enabled = true
-	env.adjustment_saturation = 1.35
-	env.adjustment_contrast = 1.08
+	_env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	_env.ambient_light_color = Color(0.78, 0.78, 0.82)
+	_env.ambient_light_energy = 0.45
+	_env.reflected_light_source = Environment.REFLECTION_SOURCE_DISABLED
+	_env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	_env.tonemap_exposure = 0.95
+	# Atmospheric haze: distant ground fades into the horizon colour and hides LOD swaps.
+	_env.fog_enabled = true
+	_env.fog_mode = Environment.FOG_MODE_EXPONENTIAL
+	_env.fog_light_color = HAZE
+	_env.fog_sun_scatter = 0.15
+	_env.fog_density = 0.00006
+	_env.fog_aerial_perspective = 0.35
+	_env.fog_sky_affect = 0.0
+	_env.glow_intensity = 0.4
+	_env.glow_hdr_threshold = 1.3
+	_env.adjustment_enabled = true
+	_env.adjustment_saturation = 1.35
+	_env.adjustment_contrast = 1.08
 	var we := WorldEnvironment.new()
-	we.environment = env
+	we.environment = _env
 	add_child(we)
-	var sun := DirectionalLight3D.new()
-	sun.rotation = Vector3(deg_to_rad(-52), deg_to_rad(35), 0)
-	sun.light_color = Color(1.0, 0.97, 0.9)
-	sun.light_energy = 1.0
-	sun.shadow_enabled = true
-	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
-	sun.directional_shadow_max_distance = 220.0
-	add_child(sun)
+	_sun = DirectionalLight3D.new()
+	_sun.rotation = Vector3(deg_to_rad(-52), deg_to_rad(35), 0)
+	_sun.light_color = Color(1.0, 0.97, 0.9)
+	_sun.light_energy = 1.0
+	_sun.directional_shadow_fade_start = 0.75
+	add_child(_sun)
 
 
 # --- Ground -------------------------------------------------------------------------------
@@ -162,15 +231,28 @@ func _blocked(x: float, z: float, margin: float) -> bool:
 	return false
 
 
-func _build_ground() -> void:
-	var b := Blocks.new()
-	b.flat(Vector2(GROUND_SIZE, GROUND_SIZE), Vector3.ZERO, GRASS)
+func _build_ground(b: Blocks) -> void:
+	_build_far_ground(b)
 	_build_fields(b)
 	for lake in LAKES:
 		_add_lake(b, lake[0], lake[1])
 	for road in ROADS:
 		_add_road(b, road)
-	_add_static_mesh(b, "Ground")
+
+
+## Ground plane as a grid of big grass patches; outside the detailed farmland they get
+## slightly different tints so the far countryside isn't one flat green.
+func _build_far_ground(b: Blocks) -> void:
+	var n := int(GROUND_SIZE / GROUND_CELL)
+	var origin := Vector2(AREA_MIN + AREA_MAX) * 0.5 - Vector2.ONE * GROUND_SIZE * 0.5
+	for ix in n:
+		for iz in n:
+			var lo := origin + Vector2(ix, iz) * GROUND_CELL
+			var hi := lo + Vector2.ONE * GROUND_CELL
+			var inside := hi.x > AREA_MIN.x and lo.x < AREA_MAX.x and hi.y > AREA_MIN.y and lo.y < AREA_MAX.y
+			var col: Color = GRASS if inside else FAR_TINTS[_rng.randi() % FAR_TINTS.size()]
+			var mid := (lo + hi) * 0.5
+			b.flat(Vector2.ONE * GROUND_CELL, Vector3(mid.x, 0, mid.y), col)
 
 
 func _build_fields(b: Blocks) -> void:
@@ -243,22 +325,30 @@ func _add_road(b: Blocks, pts: Array) -> void:
 			b.flat(Vector2(14, d.length() / pieces + 14), Vector3(m.x, 0.1, m.y), ROAD, yaw)
 
 
-func _add_static_mesh(b: Blocks, node_name: String) -> MeshInstance3D:
+func _add_static_mesh(b: Blocks, node_name: String, parent: Node = self) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
 	mi.name = node_name
 	mi.mesh = b.commit()
 	mi.material_override = _mat
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	add_child(mi)
+	parent.add_child(mi)
 	return mi
+
+
+## Registers a near-detail node that fades out beyond `distance` (scaled by quality).
+func _add_lod(gi: GeometryInstance3D, distance: float) -> void:
+	_lod.append({"node": gi, "range": distance})
+
+
+func _tile_key(p: Vector3) -> Vector2i:
+	return Vector2i(floori(p.x / TILE), floori(p.z / TILE))
 
 
 # --- Mountains ------------------------------------------------------------------------------
 
 ## Cones that exactly match FlightModel.MOUNTAINS (radius nudged so the faceted mesh sits
 ## halfway between the inscribed and circumscribed circle of the true cone).
-func _build_mountains() -> void:
-	var b := Blocks.new()
+func _build_mountains(b: Blocks) -> void:
 	var seg := 20
 	var fudge := (1.0 + 1.0 / cos(PI / seg)) * 0.5
 	for m in FlightModel.MOUNTAINS:
@@ -269,7 +359,6 @@ func _build_mountains() -> void:
 		b.cone_band(c, r, h, 0.0, h * 0.3, seg, Color(0.35, 0.58, 0.3))
 		b.cone_band(c, r, h, h * 0.3, h * 0.68, seg, Color(0.55, 0.5, 0.48))
 		b.cone_band(c, r, h, h * 0.68, h, seg, Color(0.97, 0.98, 1.0))
-	_add_static_mesh(b, "Mountains")
 
 
 # --- Trees and houses ------------------------------------------------------------------------
@@ -288,12 +377,24 @@ func _tree_mesh(pine: bool) -> ArrayMesh:
 		b.cylinder(Vector3.ZERO, 0.9, 0.6, 5.5, trunk, Transform3D.IDENTITY, 6, false)
 		var g := Color(0.33, 0.7, 0.28)
 		b.ellipsoid(Vector3(0, 8.0, 0), Vector3(4.2, 3.6, 4.2), g, Transform3D.IDENTITY, 8, 5)
-		b.ellipsoid(Vector3(1.6, 10.2, 0.8), Vector3(2.6, 2.3, 2.6), g.lightened(0.1), Transform3D.IDENTITY, 7, 4)
-		b.ellipsoid(Vector3(-1.8, 9.4, -1.0), Vector3(2.4, 2.1, 2.4), g.darkened(0.06), Transform3D.IDENTITY, 7, 4)
+		b.ellipsoid(Vector3(1.6, 10.2, 0.8), Vector3(2.6, 2.3, 2.6), g.lightened(0.1), Transform3D.IDENTITY, 6, 4)
+		b.ellipsoid(Vector3(-1.8, 9.4, -1.0), Vector3(2.4, 2.1, 2.4), g.darkened(0.06), Transform3D.IDENTITY, 6, 4)
 	return b.commit()
 
 
-func _build_forests() -> void:
+## Far stand-in for a tree (4-11 triangles). Its vertices line up with the detailed mesh's
+## facets and sit just inside it, so both can draw at once without poking through.
+func _far_tree_mesh(pine: bool) -> ArrayMesh:
+	var b := Blocks.new()
+	if pine:
+		b.cylinder(Vector3(0, 2.4, 0), 2.6, 0.0, 8.8, Color(0.2, 0.5, 0.33), Transform3D.IDENTITY, 4)
+	else:
+		b.cylinder(Vector3.ZERO, 0.8, 0.0, 5.5, Color(0.5, 0.33, 0.2), Transform3D.IDENTITY, 3)
+		b.ellipsoid(Vector3(0, 8.0, 0), Vector3(3.9, 3.4, 3.9), Color(0.35, 0.71, 0.29), Transform3D.IDENTITY, 4, 2)
+	return b.commit()
+
+
+func _build_forests(land: Blocks) -> void:
 	var round_xf: Array[Transform3D] = []
 	var pine_xf: Array[Transform3D] = []
 	var round_col: Array[Color] = []
@@ -324,8 +425,17 @@ func _build_forests() -> void:
 				continue
 			p.y = FlightModel.mountain_height(p) - 1.0
 			_push_tree(pine_xf, pine_col, p)
-	_add_multimesh("RoundTrees", _tree_mesh(false), round_xf, round_col)
-	_add_multimesh("PineTrees", _tree_mesh(true), pine_xf, pine_col)
+	_add_tiled_multimesh("RoundTrees", _tree_mesh(false), round_xf, round_col, TREE_NEAR)
+	_add_tiled_multimesh("PineTrees", _tree_mesh(true), pine_xf, pine_col, TREE_NEAR)
+	_bake_far_trees(land, _far_tree_mesh(false), round_xf, round_col)
+	_bake_far_trees(land, _far_tree_mesh(true), pine_xf, pine_col)
+
+
+## Far trees are baked straight into the landscape mesh: no extra draw calls at all.
+func _bake_far_trees(land: Blocks, mesh: ArrayMesh, xfs: Array[Transform3D], cols: Array[Color]) -> void:
+	var arrays := mesh.surface_get_arrays(0)
+	for i in xfs.size():
+		land.instance(arrays, xfs[i], cols[i])
 
 
 func _push_tree(xfs: Array[Transform3D], cols: Array[Color], p: Vector3) -> void:
@@ -335,7 +445,7 @@ func _push_tree(xfs: Array[Transform3D], cols: Array[Color], p: Vector3) -> void
 	cols.append(Color(v, v * _rng.randf_range(0.95, 1.05), v))
 
 
-func _add_multimesh(node_name: String, mesh: Mesh, xfs: Array, cols: Array, shadows := false) -> MultiMesh:
+func _make_multimesh(mesh: Mesh, xfs: Array, cols: Array) -> MultiMesh:
 	var mm := MultiMesh.new()
 	mm.transform_format = MultiMesh.TRANSFORM_3D
 	mm.use_colors = not cols.is_empty()
@@ -345,18 +455,52 @@ func _add_multimesh(node_name: String, mesh: Mesh, xfs: Array, cols: Array, shad
 		mm.set_instance_transform(i, xfs[i])
 		if mm.use_colors:
 			mm.set_instance_color(i, cols[i])
-	var mmi := MultiMeshInstance3D.new()
-	mmi.name = node_name
-	mmi.multimesh = mm
-	mmi.material_override = _mat
-	if not shadows:
-		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	add_child(mmi)
 	return mm
 
 
-## House with a gable roof, framed windows, a door with a step, and a chimney.
-func _add_house(b: Blocks, xf: Transform3D, big: bool) -> void:
+## One MultiMesh for every instance. `shadows` = may cast shadows (when the quality allows).
+func _add_multimesh(node_name: String, mesh: Mesh, xfs: Array, cols: Array, shadows := false,
+		parent: Node = self) -> MultiMeshInstance3D:
+	var mmi := MultiMeshInstance3D.new()
+	mmi.name = node_name
+	mmi.multimesh = _make_multimesh(mesh, xfs, cols)
+	mmi.material_override = _mat
+	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	if shadows:
+		_shadow_casters.append(mmi)
+	parent.add_child(mmi)
+	return mmi
+
+
+## Splits instances into TILE chunks, each its own MultiMesh that fades out beyond `near`.
+func _add_tiled_multimesh(node_name: String, mesh: Mesh, xfs: Array, cols: Array, near: float) -> void:
+	var buckets := {}
+	for i in xfs.size():
+		var key := _tile_key((xfs[i] as Transform3D).origin)
+		if not buckets.has(key):
+			buckets[key] = [[], []]
+		buckets[key][0].append(xfs[i])
+		if not cols.is_empty():
+			buckets[key][1].append(cols[i])
+	var root := Node3D.new()
+	root.name = node_name
+	add_child(root)
+	for key: Vector2i in buckets:
+		var mmi := _add_multimesh("%d_%d" % [key.x, key.y], mesh, buckets[key][0], buckets[key][1], false, root)
+		_add_lod(mmi, near)
+
+
+## Detailed-geometry builder for the LOD tile containing `p`.
+func _tile_blocks(tiles: Dictionary, p: Vector3) -> Blocks:
+	var key := _tile_key(p)
+	if not tiles.has(key):
+		tiles[key] = Blocks.new()
+	return tiles[key]
+
+
+## House with a gable roof, framed windows, a door with a step, and a chimney. The far version
+## is just walls and roof, a hair smaller so the detailed house hides it up close.
+func _add_house(near: Blocks, far: Blocks, xf: Transform3D, big: bool) -> void:
 	var size := Vector3(_rng.randf_range(9, 14), _rng.randf_range(6, 8), _rng.randf_range(8, 11))
 	if big:
 		size *= Vector3(1.6, 1.3, 1.4)
@@ -365,55 +509,68 @@ func _add_house(b: Blocks, xf: Transform3D, big: bool) -> void:
 	var glass := Color(0.45, 0.7, 0.95)
 	var frame := Color(0.98, 0.98, 0.98)
 	var front := size.z * 0.5
-	b.box(size, Vector3(0, size.y * 0.5, 0), wall, xf)
-	b.box(Vector3(size.x + 0.4, 0.8, size.z + 0.4), Vector3(0, 0.4, 0), wall.darkened(0.3), xf)
-	b.roof(Vector3(size.x + 1.6, size.z * 0.45, size.z + 1.6), Vector3(0, size.y, 0), roof_col, xf)
-	b.box(Vector3(1.4, 4.0, 1.4), Vector3(size.x * 0.3, size.y + 2.4, -size.z * 0.15), Color(0.6, 0.35, 0.28), xf)
-	b.box(Vector3(2.2, 3.6, 0.3), Vector3(0, 1.8, front + 0.1), Color(0.5, 0.28, 0.18), xf)
-	b.box(Vector3(3.2, 0.4, 1.4), Vector3(0, 0.2, front + 0.7), Color(0.7, 0.7, 0.7), xf)
+	far.box(size - Vector3(0.3, 0.2, 0.3), Vector3(0, size.y * 0.5 - 0.1, 0), wall, xf)
+	far.roof(Vector3(size.x + 1.2, size.z * 0.45, size.z + 1.4), Vector3(0, size.y - 0.25, 0), roof_col, xf)
+	near.box(size, Vector3(0, size.y * 0.5, 0), wall, xf)
+	near.box(Vector3(size.x + 0.4, 0.8, size.z + 0.4), Vector3(0, 0.4, 0), wall.darkened(0.3), xf)
+	near.roof(Vector3(size.x + 1.6, size.z * 0.45, size.z + 1.6), Vector3(0, size.y, 0), roof_col, xf)
+	near.box(Vector3(1.4, 4.0, 1.4), Vector3(size.x * 0.3, size.y + 2.4, -size.z * 0.15), Color(0.6, 0.35, 0.28), xf)
+	near.box(Vector3(2.2, 3.6, 0.3), Vector3(0, 1.8, front + 0.1), Color(0.5, 0.28, 0.18), xf)
+	near.box(Vector3(3.2, 0.4, 1.4), Vector3(0, 0.2, front + 0.7), Color(0.7, 0.7, 0.7), xf)
 	for side in [-1.0, 1.0]:
 		for z in [front, -front]:
 			var c := Vector3(side * size.x * 0.28, size.y * 0.55, z)
 			var out := 0.12 if z > 0.0 else -0.12
-			b.box(Vector3(2.6, 2.6, 0.2), c + Vector3(0, 0, out), frame, xf)
-			b.box(Vector3(2.0, 2.0, 0.2), c + Vector3(0, 0, out * 2.0), glass, xf)
+			near.box(Vector3(2.6, 2.6, 0.2), c + Vector3(0, 0, out), frame, xf)
+			near.box(Vector3(2.0, 2.0, 0.2), c + Vector3(0, 0, out * 2.0), glass, xf)
 	for z in [-0.2, 0.2]:
 		var c := Vector3(size.x * 0.5, size.y * 0.55, z * size.z)
-		b.box(Vector3(0.2, 2.4, 2.4), c + Vector3(0.12, 0, 0), frame, xf)
-		b.box(Vector3(0.2, 1.8, 1.8), c + Vector3(0.24, 0, 0), glass, xf)
+		near.box(Vector3(0.2, 2.4, 2.4), c + Vector3(0.12, 0, 0), frame, xf)
+		near.box(Vector3(0.2, 1.8, 1.8), c + Vector3(0.24, 0, 0), glass, xf)
 
 
 ## White chapel with a pointed spire and a round window.
-func _add_church(b: Blocks, xf: Transform3D) -> void:
+func _add_church(near: Blocks, far: Blocks, xf: Transform3D) -> void:
 	var white := Color(0.95, 0.93, 0.88)
-	b.box(Vector3(14, 12, 24), Vector3(0, 6, 0), white, xf)
-	b.roof(Vector3(25, 7, 15), Vector3(0, 12, 0), Color(0.5, 0.3, 0.25), xf * Transform3D(Basis(Vector3.UP, PI / 2), Vector3.ZERO))
-	b.box(Vector3(7, 26, 7), Vector3(0, 13, -14), white, xf)
-	b.box(Vector3(7.6, 1, 7.6), Vector3(0, 26.5, -14), Color(0.35, 0.45, 0.6), xf)
-	b.cylinder(Vector3(0, 27, -14), 4.6, 0.0, 14.0, Color(0.35, 0.45, 0.6), xf, 8)
-	b.cylinder(Vector3.ZERO, 2.0, 2.0, 0.3, Color(0.95, 0.75, 0.3), xf * Blocks.axis_xf(Vector3(0, 8, 12), Vector3.BACK), 10)
+	var slate := Color(0.35, 0.45, 0.6)
+	var turn := xf * Transform3D(Basis(Vector3.UP, PI / 2), Vector3.ZERO)
+	far.box(Vector3(13.6, 11.8, 23.6), Vector3(0, 5.9, 0), white, xf)
+	far.roof(Vector3(24.6, 7, 14.6), Vector3(0, 11.75, 0), Color(0.5, 0.3, 0.25), turn)
+	far.box(Vector3(6.6, 25.8, 6.6), Vector3(0, 12.9, -14), white, xf)
+	far.cylinder(Vector3(0, 27.1, -14), 4.2, 0.0, 13.5, slate, xf, 4)
+	near.box(Vector3(14, 12, 24), Vector3(0, 6, 0), white, xf)
+	near.roof(Vector3(25, 7, 15), Vector3(0, 12, 0), Color(0.5, 0.3, 0.25), turn)
+	near.box(Vector3(7, 26, 7), Vector3(0, 13, -14), white, xf)
+	near.box(Vector3(7.6, 1, 7.6), Vector3(0, 26.5, -14), slate, xf)
+	near.cylinder(Vector3(0, 27, -14), 4.6, 0.0, 14.0, slate, xf, 8)
+	near.cylinder(Vector3.ZERO, 2.0, 2.0, 0.3, Color(0.95, 0.75, 0.3), xf * Blocks.axis_xf(Vector3(0, 8, 12), Vector3.BACK), 10)
 	for z in [-6.0, 0.0, 6.0]:
-		b.box(Vector3(0.3, 4, 2), Vector3(7.1, 6, z), Color(0.5, 0.7, 0.95), xf)
-		b.box(Vector3(0.3, 4, 2), Vector3(-7.1, 6, z), Color(0.5, 0.7, 0.95), xf)
+		near.box(Vector3(0.3, 4, 2), Vector3(7.1, 6, z), Color(0.5, 0.7, 0.95), xf)
+		near.box(Vector3(0.3, 4, 2), Vector3(-7.1, 6, z), Color(0.5, 0.7, 0.95), xf)
 
 
 ## Red barn with white trim, cross-braced doors and a round silo with a dome.
-func _add_barn(b: Blocks, xf: Transform3D) -> void:
+func _add_barn(near: Blocks, far: Blocks, xf: Transform3D) -> void:
 	var red := Color(0.8, 0.2, 0.18)
 	var trim := Color(0.98, 0.95, 0.9)
-	b.box(Vector3(16, 10, 22), Vector3(0, 5, 0), red, xf)
-	b.roof(Vector3(23, 6, 17), Vector3(0, 10, 0), Color(0.35, 0.33, 0.35), xf * Transform3D(Basis(Vector3.UP, PI / 2), Vector3.ZERO))
-	b.box(Vector3(7, 7.4, 0.3), Vector3(0, 3.7, 11.1), trim, xf)
-	b.box(Vector3(6, 6.4, 0.3), Vector3(0, 3.5, 11.2), red.darkened(0.15), xf)
+	var turn := xf * Transform3D(Basis(Vector3.UP, PI / 2), Vector3.ZERO)
+	var silo := Color(0.75, 0.78, 0.82)
+	far.box(Vector3(15.6, 9.8, 21.6), Vector3(0, 4.9, 0), red, xf)
+	far.roof(Vector3(22.6, 6, 16.6), Vector3(0, 9.75, 0), Color(0.35, 0.33, 0.35), turn)
+	far.cylinder(Vector3(13, 0, 0), 2.7, 2.7, 14.8, silo, xf, 5)
+	near.box(Vector3(16, 10, 22), Vector3(0, 5, 0), red, xf)
+	near.roof(Vector3(23, 6, 17), Vector3(0, 10, 0), Color(0.35, 0.33, 0.35), turn)
+	near.box(Vector3(7, 7.4, 0.3), Vector3(0, 3.7, 11.1), trim, xf)
+	near.box(Vector3(6, 6.4, 0.3), Vector3(0, 3.5, 11.2), red.darkened(0.15), xf)
 	for tilt in [0.75, -0.75]:
-		b.box(Vector3(0.6, 8.6, 0.3), Vector3.ZERO, trim, xf * Transform3D(Basis(Vector3.BACK, tilt), Vector3(0, 3.5, 11.35)))
-	b.box(Vector3(2.4, 2.4, 0.3), Vector3(0, 11.5, 11.1), trim, xf)
-	b.cylinder(Vector3(13, 0, 0), 2.8, 2.8, 15, Color(0.75, 0.78, 0.82), xf, 10, false)
-	b.ellipsoid(Vector3(13, 15, 0), Vector3(2.9, 2.4, 2.9), Color(0.55, 0.6, 0.68), xf, 10, 5)
+		near.box(Vector3(0.6, 8.6, 0.3), Vector3.ZERO, trim, xf * Transform3D(Basis(Vector3.BACK, tilt), Vector3(0, 3.5, 11.35)))
+	near.box(Vector3(2.4, 2.4, 0.3), Vector3(0, 11.5, 11.1), trim, xf)
+	near.cylinder(Vector3(13, 0, 0), 2.8, 2.8, 15, silo, xf, 10, false)
+	near.ellipsoid(Vector3(13, 15, 0), Vector3(2.9, 2.4, 2.9), Color(0.55, 0.6, 0.68), xf, 10, 5)
 
 
-func _build_villages() -> void:
-	var b := Blocks.new()
+func _build_villages(far: Blocks) -> void:
+	var tiles := {}
 	var made := 0
 	while made < 16:
 		var cx := _rng.randf_range(AREA_MIN.x + 500, AREA_MAX.x - 500)
@@ -424,15 +581,16 @@ func _build_villages() -> void:
 		var yaw := _rng.randf() * TAU
 		var base := Transform3D(Basis(Vector3.UP, yaw), Vector3(cx, 0, cz))
 		if _rng.randf() < 0.6:
-			_add_church(b, base)
+			_add_church(_tile_blocks(tiles, base.origin), far, base)
 		for k in _rng.randi_range(10, 26):
 			var lx := snappedf(_rng.randf_range(-170, 170), 30.0)
 			var lz := snappedf(_rng.randf_range(-170, 170), 30.0)
 			if absf(lx) < 25 and absf(lz) < 35:
 				continue
 			var turn := PI if _rng.randf() < 0.5 else 0.0
-			_add_house(b, base * Transform3D(Basis(Vector3.UP, turn), Vector3(lx, 0, lz)), false)
-		b.flat(Vector2(16, 420), Vector3(cx, 0.1, cz), ROAD, yaw)
+			var xf := base * Transform3D(Basis(Vector3.UP, turn), Vector3(lx, 0, lz))
+			_add_house(_tile_blocks(tiles, xf.origin), far, xf, false)
+		far.flat(Vector2(16, 420), Vector3(cx, 0.1, cz), ROAD, yaw)
 	# Lonely farms between the villages.
 	var farms := 0
 	while farms < 90:
@@ -442,24 +600,31 @@ func _build_villages() -> void:
 			continue
 		farms += 1
 		var xf := Transform3D(Basis(Vector3.UP, _rng.randf() * TAU), Vector3(x, 0, z))
-		_add_house(b, xf, _rng.randf() < 0.3)
+		var near := _tile_blocks(tiles, xf.origin)
+		_add_house(near, far, xf, _rng.randf() < 0.3)
 		if _rng.randf() < 0.7:
-			_add_barn(b, xf * Transform3D(Basis.IDENTITY, Vector3(30, 0, 6)))
-	var mi := _add_static_mesh(b, "Villages")
-	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+			_add_barn(near, far, xf * Transform3D(Basis.IDENTITY, Vector3(30, 0, 6)))
+	var root := Node3D.new()
+	root.name = "Villages"
+	add_child(root)
+	for key: Vector2i in tiles:
+		var mi := _add_static_mesh(tiles[key], "%d_%d" % [key.x, key.y], root)
+		_shadow_casters.append(mi)
+		_add_lod(mi, VILLAGE_NEAR)
 
 
 # --- Clouds ---------------------------------------------------------------------------------
 
+## Puffy cumulus: bright domed tops over a flatter, blue-grey shaded base.
 func _cloud_mesh() -> ArrayMesh:
 	var b := Blocks.new()
 	var white := Color(1, 1, 1)
-	var shade := Color(0.86, 0.9, 0.97)
-	b.ellipsoid(Vector3(0, 10, 0), Vector3(34, 11, 20), shade, Transform3D.IDENTITY, 10, 5)
-	b.ellipsoid(Vector3(-16, 20, 2), Vector3(18, 14, 15), white, Transform3D.IDENTITY, 9, 5)
-	b.ellipsoid(Vector3(12, 23, -3), Vector3(17, 17, 16), white, Transform3D.IDENTITY, 9, 5)
-	b.ellipsoid(Vector3(32, 13, 5), Vector3(13, 9, 12), white, Transform3D.IDENTITY, 8, 4)
-	b.ellipsoid(Vector3(-34, 11, -4), Vector3(13, 8, 12), white, Transform3D.IDENTITY, 8, 4)
+	var shade := Color(0.82, 0.87, 0.95)
+	b.ellipsoid(Vector3(0, 8, 0), Vector3(36, 8, 21), shade, Transform3D.IDENTITY, 8, 4)
+	b.ellipsoid(Vector3(-16, 20, 2), Vector3(18, 14, 15), white, Transform3D.IDENTITY, 7, 4)
+	b.ellipsoid(Vector3(12, 23, -3), Vector3(17, 17, 16), white, Transform3D.IDENTITY, 7, 4)
+	b.ellipsoid(Vector3(32, 13, 5), Vector3(13, 9, 12), white, Transform3D.IDENTITY, 6, 3)
+	b.ellipsoid(Vector3(-34, 11, -4), Vector3(13, 8, 12), white, Transform3D.IDENTITY, 6, 3)
 	return b.commit()
 
 
@@ -503,13 +668,16 @@ func _car_mesh() -> ArrayMesh:
 	var b := Blocks.new()
 	var dark := Color(0.12, 0.12, 0.14)
 	b.box(Vector3(2.0, 0.9, 4.2), Vector3(0, 0.85, 0), Color.WHITE)
-	b.ellipsoid(Vector3(0, 1.4, 0.3), Vector3(0.95, 0.75, 1.3), Color(0.92, 0.95, 1.0), Transform3D.IDENTITY, 8, 4)
+	b.ellipsoid(Vector3(0, 1.4, 0.3), Vector3(0.95, 0.75, 1.3), Color(0.92, 0.95, 1.0), Transform3D.IDENTITY, 6, 3)
 	b.box(Vector3(1.7, 0.5, 0.1), Vector3(0, 1.55, -0.85), Color(0.25, 0.4, 0.6))
 	for x in [-1.0, 1.0]:
 		for z in [-1.35, 1.35]:
-			b.cylinder(Vector3.ZERO, 0.45, 0.45, 0.4, dark, Blocks.axis_xf(Vector3(x * 0.82, 0.45, z), Vector3(x, 0, 0)), 8)
-		b.box(Vector3(0.4, 0.25, 0.1), Vector3(x * 0.65, 0.95, -2.12), Color(1, 1, 0.8))
-		b.box(Vector3(0.4, 0.25, 0.1), Vector3(x * 0.65, 0.95, 2.12), Color(1, 0.2, 0.15))
+			b.cylinder(Vector3.ZERO, 0.45, 0.45, 0.4, dark, Blocks.axis_xf(Vector3(x * 0.82, 0.45, z), Vector3(x, 0, 0)), 6)
+		var lx: float = x * 0.65
+		b.quad(Vector3(lx - 0.2, 0.83, -2.11), Vector3(lx + 0.2, 0.83, -2.11), Vector3(lx + 0.2, 1.07, -2.11),
+			Vector3(lx - 0.2, 1.07, -2.11), Color(1, 1, 0.8), Vector3.FORWARD)
+		b.quad(Vector3(lx - 0.2, 0.83, 2.11), Vector3(lx + 0.2, 0.83, 2.11), Vector3(lx + 0.2, 1.07, 2.11),
+			Vector3(lx - 0.2, 1.07, 2.11), Color(1, 0.2, 0.15), Vector3.BACK)
 	return b.commit()
 
 
@@ -531,7 +699,7 @@ func _build_cars() -> void:
 					"d": _rng.randf() * length, "speed": _rng.randf_range(14.0, 26.0)})
 				xfs.append(Transform3D.IDENTITY)
 				cols.append(palette[_rng.randi() % palette.size()])
-	_car_mm = _add_multimesh("Cars", _car_mesh(), xfs, cols, true)
+	_car_mm = _add_multimesh("Cars", _car_mesh(), xfs, cols).multimesh
 
 
 ## Classic windmills: tapered tower and cap are static; the four sails are a spinning MultiMesh.
@@ -552,8 +720,7 @@ func _build_windmills() -> void:
 		var hub := xf * Transform3D(Basis.IDENTITY, Vector3(5.2, 22, 0))
 		_rotor_base.append(hub)
 		xfs.append(hub)
-	var mi := _add_static_mesh(b, "Windmills")
-	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+	_shadow_casters.append(_add_static_mesh(b, "Windmills"))
 	var r := Blocks.new()
 	var wood := Color(0.5, 0.33, 0.2)
 	var sail := Color(0.98, 0.96, 0.9)
@@ -562,7 +729,7 @@ func _build_windmills() -> void:
 		r.box(Vector3(0.5, 15, 0.6), Vector3(0, 7.8, 0), wood, xf, true)
 		r.box(Vector3(0.3, 11, 3.2), Vector3(0, 9.5, 1.8), sail, xf, true)
 	r.ellipsoid(Vector3.ZERO, Vector3(1, 1, 1), wood, Transform3D.IDENTITY, 6, 4)
-	_rotor_mm = _add_multimesh("WindmillSails", r.commit(), xfs, [], true)
+	_rotor_mm = _add_multimesh("WindmillSails", r.commit(), xfs, [], true).multimesh
 
 
 ## Spotty cartoon cow grazing in herds.
@@ -570,15 +737,15 @@ func _cow_mesh() -> ArrayMesh:
 	var b := Blocks.new()
 	var white := Color(0.97, 0.97, 0.95)
 	var black := Color(0.1, 0.1, 0.12)
-	b.ellipsoid(Vector3(0, 1.35, 0), Vector3(0.75, 0.65, 1.25), white, Transform3D.IDENTITY, 8, 5)
-	b.ellipsoid(Vector3(0.45, 1.6, 0.3), Vector3(0.38, 0.35, 0.45), black, Transform3D.IDENTITY, 6, 4)
-	b.ellipsoid(Vector3(-0.4, 1.3, -0.4), Vector3(0.4, 0.4, 0.4), black, Transform3D.IDENTITY, 6, 4)
+	b.ellipsoid(Vector3(0, 1.35, 0), Vector3(0.75, 0.65, 1.25), white, Transform3D.IDENTITY, 8, 4)
+	b.ellipsoid(Vector3(0.45, 1.6, 0.3), Vector3(0.38, 0.35, 0.45), black, Transform3D.IDENTITY, 5, 3)
+	b.ellipsoid(Vector3(-0.4, 1.3, -0.4), Vector3(0.4, 0.4, 0.4), black, Transform3D.IDENTITY, 5, 3)
 	b.box(Vector3(0.6, 0.6, 0.8), Vector3(0, 1.7, -1.4), white)
 	b.box(Vector3(0.62, 0.35, 0.3), Vector3(0, 1.5, -1.85), Color(1, 0.65, 0.7))
 	for x in [-0.3, 0.3]:
 		b.box(Vector3(0.12, 0.25, 0.12), Vector3(x, 2.1, -1.3), Color(0.95, 0.9, 0.7))
 		for z in [-0.75, 0.75]:
-			b.cylinder(Vector3(x * 1.4, 0, z), 0.13, 0.15, 0.95, white.darkened(0.1), Transform3D.IDENTITY, 5, false)
+			b.cylinder(Vector3(x * 1.4, 0, z), 0.13, 0.15, 0.95, white.darkened(0.1), Transform3D.IDENTITY, 4, false)
 	return b.commit()
 
 
@@ -602,7 +769,7 @@ func _build_cows() -> void:
 			var s := _rng.randf_range(1.3, 1.7)
 			var p := Vector3(x + _rng.randf_range(-40, 40), 0, z + _rng.randf_range(-40, 40))
 			xfs.append(Transform3D(Basis(Vector3.UP, _rng.randf() * TAU).scaled(Vector3.ONE * s), p))
-	_add_multimesh("Cows", _cow_mesh(), xfs, [])
+	_add_tiled_multimesh("Cows", _cow_mesh(), xfs, [], COW_NEAR)
 
 
 ## Sailboat; the hull is tinted per instance, sails stay white.
@@ -627,7 +794,7 @@ func _build_boats() -> void:
 				"angle": _rng.randf() * TAU, "speed": dir * _rng.randf_range(0.015, 0.03)})
 			xfs.append(Transform3D.IDENTITY)
 			cols.append(palette[_rng.randi() % palette.size()])
-	_boat_mm = _add_multimesh("Boats", _boat_mesh(), xfs, cols, true)
+	_boat_mm = _add_multimesh("Boats", _boat_mesh(), xfs, cols).multimesh
 
 
 ## Striped hot-air balloon with a wicker basket on ropes.
@@ -637,8 +804,8 @@ func _balloon_mesh() -> ArrayMesh:
 	# Envelope as vertical slices of an ellipsoid, alternating stripe colours.
 	for k in 8:
 		var xf := Transform3D(Basis(Vector3.UP, k * TAU / 8.0), Vector3.ZERO)
-		b.ellipsoid(Vector3(0, 22, 0), Vector3(12.5 - (k % 2) * 0.3, 14, 4.6), stripes[k % 2], xf, 10, 6)
-	b.cylinder(Vector3(0, 6, 0), 3.0, 6.5, 6.0, Color.WHITE, Transform3D.IDENTITY, 10, false)
+		b.ellipsoid(Vector3(0, 22, 0), Vector3(12.5 - (k % 2) * 0.3, 14, 4.6), stripes[k % 2], xf, 8, 6)
+	b.cylinder(Vector3(0, 6, 0), 3.0, 6.5, 6.0, Color.WHITE, Transform3D.IDENTITY, 8, false)
 	b.box(Vector3(3, 2.4, 3), Vector3(0, 1.2, 0), Color(0.6, 0.42, 0.22), Transform3D.IDENTITY, true)
 	for x in [-1.4, 1.4]:
 		for z in [-1.4, 1.4]:
@@ -658,7 +825,7 @@ func _build_balloons() -> void:
 		_balloon_pos.append(p)
 		xfs.append(Transform3D(Basis.IDENTITY, p))
 		cols.append(palette[k % palette.size()])
-	_balloon_mm = _add_multimesh("Balloons", _balloon_mesh(), xfs, cols, true)
+	_balloon_mm = _add_multimesh("Balloons", _balloon_mesh(), xfs, cols).multimesh
 
 
 # --- Collision ------------------------------------------------------------------------------

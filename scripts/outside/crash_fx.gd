@@ -2,15 +2,16 @@ extends Node3D
 ## Cartoon crash: a chain of fireballs, flashes, smoke and flying debris around the plane,
 ## a "KA-BOOM!" sign and camera shake. Cosmetic only; runs on every peer.
 
-## Plane-local blast points with delays: [position, delay seconds, size].
+## Plane-local blast points with delays: [position, delay seconds, size]. Outer wings sit
+## between the engines (x ±7) and the wingtips (±15.3); the belly blast is at the hull bottom.
 const BLASTS := [
 	[Vector3(0, 0.5, Airliner.NOSE_Z + 1.0), 0.0, 1.4],
 	[Airliner.ENGINE_POS[0], 0.25, 1.1],
 	[Airliner.ENGINE_POS[1], 0.45, 1.1],
-	[Vector3(-11, 0.0, 1.0), 0.75, 0.8],
-	[Vector3(11, 0.0, 1.0), 0.9, 0.8],
+	[Vector3(-12, -0.5, 0.7), 0.75, 0.8],
+	[Vector3(12, -0.5, 0.7), 0.9, 0.8],
 	[Vector3(0, 1.5, Airliner.TAIL_Z - 1.0), 1.2, 1.0],
-	[Vector3(0, -1.2, 4.0), 1.6, 1.3],
+	[Vector3(0, Airliner.HULL_CY - Airliner.HULL_R, 4.0), 1.6, 1.3],
 ]
 const DEBRIS_COLORS := [Color(0.93, 0.94, 0.96), Color(0.15, 0.35, 0.75), Color(0.25, 0.25, 0.28)]
 
@@ -22,7 +23,7 @@ func play(world: World) -> void:
 	_world = world
 	for b in BLASTS:
 		_blast_later(world.plane.to_global(b[0]), b[1], b[2])
-	_boom_sign(world.plane.to_global(Vector3(0, 9, -4)))
+	_boom_sign(world.plane.to_global(Vector3(0, Airliner.HULL_CY + Airliner.HULL_R + 4.5, -4)))
 	# Smoke drifting through the cabin for those inside.
 	_smoke(world.plane.to_global(Vector3(0, 1.5, -2)), 0.6, 40, 6.0)
 
