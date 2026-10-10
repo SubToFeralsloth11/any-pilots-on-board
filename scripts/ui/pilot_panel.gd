@@ -16,7 +16,7 @@ const WARN := Color(1, 0.75, 0.15)
 const BAD := Color(1, 0.3, 0.25)
 const PARTS := [["engine0", "ENG L"], ["engine1", "ENG R"], ["wing0", "WING L"], ["wing1", "WING R"],
 	["tail", "TAIL"], ["hull", "HULL"]]
-const HINT := "W nose down · S nose up · A/D bank · Shift/Ctrl throttle · F flaps · G gear · E leave seat"
+const HINT := "W nose down · S nose up · A/D bank · Shift/Ctrl throttle · F flaps · G gear · E leave seat · B seatbelts"
 
 var world: World
 var _t := 0.0
@@ -26,6 +26,12 @@ func _process(dt: float) -> void:
 	_t += dt
 	if visible:
 		queue_redraw()
+
+
+## [B] while piloting (the panel is only visible in the pilot seat) toggles the seatbelt sign.
+func _unhandled_input(event: InputEvent) -> void:
+	if visible and world != null and event.is_action_pressed("seatbelt"):
+		world.request("seatbelt")
 
 
 ## Health 0..1 of a plane part (see Airliner.DAMAGE_PARTS); missing entries count as intact.
@@ -100,6 +106,14 @@ func _speed_tape(font: Font, r: Rect2, f: FlightModel) -> void:
 	var stall := f.stall_speed() * MS_TO_KT
 	_tape(font, r, kt, 2.4, 5.0, 2, "%d", [[0.0, stall, BAD], [stall, stall + 10.0, WARN], [stall + 10.0, 400.0, GOOD]])
 	draw_string(font, r.position + Vector2(0, -2), "KT", HORIZONTAL_ALIGNMENT_CENTER, r.size.x, 12, DIM)
+	# Ground speed / Vr cue on takeoff roll.
+	if f.phase == FlightModel.Phase.ROLLING and f.departure_roll:
+		var vr_kt := FlightModel.VR * MS_TO_KT
+		var mid := r.position.y + r.size.y * 0.5
+		var vr_y := mid - (vr_kt - kt) * 2.4
+		if vr_y > r.position.y + 4 and vr_y < r.end.y - 4:
+			draw_line(Vector2(r.end.x - 12, vr_y), Vector2(r.end.x, vr_y), WARN, 2.5)
+			draw_string(font, Vector2(r.position.x + 4, vr_y + 5), "Vr", HORIZONTAL_ALIGNMENT_LEFT, -1, 13, WARN)
 
 
 func _alt_tape(font: Font, r: Rect2, f: FlightModel) -> void:
@@ -248,12 +262,12 @@ func _damage(font: Font, r: Rect2) -> void:
 			BAD if fire and fmod(_t, 0.5) < 0.3 else col)
 
 
-## Distance, turn arrow and glide-slope advice to the runway threshold.
+## Distance, turn arrow and glide-slope advice to the destination airport.
 func _navigation(font: Font, r: Rect2, f: FlightModel) -> void:
 	var to := FlightModel.runway_threshold() - f.pos
 	var dist := Vector2(to.x, to.z).length()
 	var turn := wrapf(atan2(-to.x, -to.z) - f.yaw, -PI, PI)   # Positive = turn left.
-	draw_string(font, r.position + Vector2(0, 10), "RUNWAY 36", HORIZONTAL_ALIGNMENT_CENTER, r.size.x, 12, DIM)
+	draw_string(font, r.position + Vector2(0, 10), "DESTINATION", HORIZONTAL_ALIGNMENT_CENTER, r.size.x, 12, DIM)
 	var c := r.position + Vector2(r.size.x * 0.5, 66)
 	draw_circle(c, 46, Color(0.08, 0.12, 0.22))
 	draw_arc(c, 46, 0, TAU, 40, BEZEL, 3.0)
@@ -278,6 +292,21 @@ func _navigation(font: Font, r: Rect2, f: FlightModel) -> void:
 			glide = "GLIDE: TOO LOW"
 			gcol = BAD
 		draw_string(font, Vector2(r.position.x, r.position.y + 172), glide, HORIZONTAL_ALIGNMENT_CENTER, r.size.x, 13, gcol)
+	# Seatbelt sign annunciator in the free corner left of the compass.
+	var sb := Rect2(r.position.x, r.position.y + 22, 44, 44)
+	var sb_col := GOOD if world.seatbelt_sign else DIM
+	draw_rect(sb, Color(sb_col, 0.18))
+	draw_rect(sb, sb_col, false, 2.0)
+	draw_string(font, sb.position + Vector2(0, 14), "BELTS", HORIZONTAL_ALIGNMENT_CENTER, sb.size.x, 10, DIM)
+	draw_string(font, sb.position + Vector2(0, 31), "ON" if world.seatbelt_sign else "OFF", HORIZONTAL_ALIGNMENT_CENTER,
+		sb.size.x, 15, sb_col)
+	draw_string(font, sb.position + Vector2(0, 42), "[B]", HORIZONTAL_ALIGNMENT_CENTER, sb.size.x, 9, DIM)
+	# Takeoff roll: ground speed against Vr, under the compass.
+	if f.phase == FlightModel.Phase.PARKED or (f.phase == FlightModel.Phase.ROLLING and f.departure_roll):
+		var rotate := f.speed >= FlightModel.VR
+		var txt := "ROTATE! [S]" if rotate else "GS %d / Vr %d kt" % [roundi(f.speed * MS_TO_KT), roundi(FlightModel.VR * MS_TO_KT)]
+		draw_string(font, Vector2(r.position.x, r.position.y + 172), txt, HORIZONTAL_ALIGNMENT_CENTER, r.size.x, 13,
+			GOOD if rotate else WARN)
 
 
 ## Flashing master-warning banners across the top of the cluster.

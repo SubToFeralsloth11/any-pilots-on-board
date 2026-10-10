@@ -1,7 +1,8 @@
 extends Node3D
-## The airport, built in runway-local coordinates (origin = FlightModel.RUNWAY_CENTER).
+## An airport, built in runway-local coordinates (origin = its runway centre; Outside places one at
+## FlightModel.ORIGIN_RUNWAY_CENTER and one at FlightModel.RUNWAY_CENTER).
 ## Runway along Z, threshold (landing end) at +Z, buildings on the +X (east) side.
-## A tall beacon beam and "rabbit" approach strobes make it findable from the start position.
+## The destination gets a tall beacon beam and "rabbit" approach strobes so it's findable from afar.
 
 const Blocks := preload("res://scripts/outside/blocks.gd")
 
@@ -19,13 +20,15 @@ const MAST_POS := Vector3(380, 0, 560)
 const DIGITS := {"1": "bc", "3": "abcdg", "6": "acdefg", "8": "abcdefg"}
 const DETAIL_NEAR := 3000.0   ## Parked planes and apron vehicles fade out beyond this (at High).
 
+## Set before adding to the tree. False for the origin airport: no beacon beam or rabbit strobe.
+var is_destination := true
+
 var _rabbit: MeshInstance3D
 var _beacon: MeshInstance3D
 var _beam_mat: StandardMaterial3D
 var _t := 0.0
 var _mesh: MeshInstance3D
 var _detail: MeshInstance3D
-
 
 func _ready() -> void:
 	var b := Blocks.new()
@@ -51,6 +54,7 @@ func _ready() -> void:
 	_build_collision()
 	Settings.changed.connect(_apply_quality)
 	_apply_quality()
+	set_process(is_destination)
 
 
 func _mesh_instance(node_name: String, b: Blocks, mat: Material) -> MeshInstance3D:
@@ -167,6 +171,8 @@ func _build_lights(b: Blocks, glow: Blocks) -> void:
 				if absi(k) > 2:
 					glow.box(Vector3(1.6, 1.2, 1.6), Vector3(k * 3.5, 2.8, zz), white)
 		d += APPROACH_STEP
+	if not is_destination:
+		return
 	_rabbit = MeshInstance3D.new()
 	var rm := BoxMesh.new()
 	rm.size = Vector3(4, 4, 4)
@@ -311,6 +317,8 @@ func _build_mast(b: Blocks) -> void:
 
 
 func _build_beacon() -> void:
+	if not is_destination:
+		return
 	_beacon = MeshInstance3D.new()
 	var bm := BoxMesh.new()
 	bm.size = Vector3(12, 12, 12)
@@ -339,7 +347,8 @@ func _build_beacon() -> void:
 
 
 func _build_signs() -> void:
-	var sign := _label("SOMEWHERE INTERNATIONAL", 0.12, Color(1, 1, 1))
+	var title := "SOMEWHERE INTERNATIONAL" if is_destination else "NOWHERE MUNICIPAL"
+	var sign := _label(title, 0.12, Color(1, 1, 1))
 	sign.position = Vector3(539, 33, 0)
 	sign.rotation.y = -PI / 2
 	var top := _label("AIRPORT", 0.6, Color(1.0, 0.85, 0.2))

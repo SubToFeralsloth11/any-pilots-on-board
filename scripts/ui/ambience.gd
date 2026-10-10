@@ -1,6 +1,7 @@
 extends Node
-## Generated ambience (no assets): an engine drone whose pitch follows the throttle, wind noise
-## that swells when the local player is outside or the hull is open, and a low boom on crashes.
+## Generated ambience (no assets): an engine drone whose pitch and loudness follow throttle and
+## engine power (idling on the ground, spooling up on the takeoff roll), wind noise only while
+## flying (louder when the local player is outside or the hull is open), and a low boom on crashes.
 
 const MIX_RATE := 22050.0
 const VOLUME_DB := -8.0
@@ -45,10 +46,11 @@ func _process(dt: float) -> void:
 	if _playback == null or world == null:
 		return
 	var f := world.flight
-	var running := f.phase == FlightModel.Phase.FLYING or f.phase == FlightModel.Phase.ROLLING
+	var running := f.phase != FlightModel.Phase.CRASHED and f.phase != FlightModel.Phase.LANDED
 	var power: float = (f.engine_power[0] + f.engine_power[1]) * 0.5
-	var target_freq := 42.0 + f.throttle * 38.0 * (0.55 + 0.45 * power) if running else 24.0
-	var target_engine := 0.05 + 0.06 * f.throttle if running else 0.0
+	var spool := f.throttle * (0.55 + 0.45 * power)
+	var target_freq := 42.0 + spool * 38.0 if running else 24.0
+	var target_engine := (0.03 + 0.08 * f.throttle) * (0.3 + 0.7 * power) if running else 0.0
 	var fire := 1.0 if world.plane.engine_fire[0] or world.plane.engine_fire[1] else 0.0
 	var k := clampf(dt * 1.5, 0.0, 1.0)
 	_freq = lerpf(_freq, target_freq, k)
@@ -58,10 +60,10 @@ func _process(dt: float) -> void:
 	_fill(dt)
 
 
-## Wind loudness: a hint indoors, louder with open windows/doors, loudest outside.
+## Wind loudness: only while flying. A hint indoors, louder with open windows/doors, loudest outside.
 func _wind_target(f: FlightModel) -> float:
-	if f.phase == FlightModel.Phase.CRASHED or f.phase == FlightModel.Phase.LANDED:
-		return 0.015
+	if f.phase != FlightModel.Phase.FLYING:
+		return 0.0
 	var airflow := clampf(f.speed / 70.0, 0.0, 1.4)
 	var level := 0.025
 	var plane := world.plane

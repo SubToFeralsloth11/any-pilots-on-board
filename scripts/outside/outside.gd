@@ -18,7 +18,7 @@ const CrashFx := preload("res://scripts/outside/crash_fx.gd")
 const SEED := 7031
 const GROUND_SIZE := 120000.0
 const GROUND_CELL := 4000.0                  ## Far patchwork cells outside the detailed region.
-const AREA_MIN := Vector2(-9000, -22000)   ## Detailed scenery region (x, z).
+const AREA_MIN := Vector2(-9000, -30000)   ## Detailed scenery region (x, z): covers both airports.
 const AREA_MAX := Vector2(11000, 7000)
 const CELL := 420.0                          ## Farm field grid.
 const TILE := 600.0                          ## LOD chunk size for near-detail scenery.
@@ -36,14 +36,17 @@ const LAKES := [
 	[Vector3(-4200, 0, -10200), 800.0],
 	[Vector3(6500, 0, -14500), 450.0],
 ]
-## Roads as polylines of (x, z) points.
+## Roads as polylines of (x, z) points. The last leg of a road may enter an airport's grounds.
 const ROADS := [
-	[Vector2(-300, 6000), Vector2(-300, -3000), Vector2(300, -8000), Vector2(3150, -11300), Vector2(3150, -12300)],
+	[Vector2(-300, 6000), Vector2(-300, -3000), Vector2(300, -8000), Vector2(2100, -12000), Vector2(2100, -21000),
+		Vector2(3150, -25300), Vector2(3150, -26300)],
+	[Vector2(3150, -2600), Vector2(3150, -2000), Vector2(3150, -1100)],
 	[Vector2(-9000, -2600), Vector2(11000, -2600)],
 	[Vector2(-9000, -8250), Vector2(11000, -8250)],
-	[Vector2(8200, 6000), Vector2(8200, -21000)],
-	[Vector2(-5500, 6000), Vector2(-5500, -21000)],
+	[Vector2(8200, 6000), Vector2(8200, -29000)],
+	[Vector2(-5500, 6000), Vector2(-5500, -29000)],
 	[Vector2(-5500, -18500), Vector2(8200, -18500)],
+	[Vector2(-9000, -28700), Vector2(11000, -28700)],
 ]
 const FIELD_COLORS := [
 	Color(0.93, 0.82, 0.32), Color(0.55, 0.8, 0.3), Color(0.36, 0.66, 0.26), Color(0.62, 0.44, 0.27),
@@ -93,10 +96,12 @@ func _ready() -> void:
 	_add_static_mesh(land, "Landscape")
 	_build_clouds()
 	_build_life()
-	var airport := Airport.new()
-	airport.name = "Airport"
-	airport.position = FlightModel.RUNWAY_CENTER
-	add_child(airport)
+	for dest: bool in [true, false]:
+		var airport := Airport.new()
+		airport.name = "DestinationAirport" if dest else "OriginAirport"
+		airport.is_destination = dest
+		airport.position = FlightModel.RUNWAY_CENTER if dest else FlightModel.ORIGIN_RUNWAY_CENTER
+		add_child(airport)
 	_build_collision()
 	if world:
 		world.round_ended.connect(_on_round_ended)
@@ -219,11 +224,11 @@ func _build_environment() -> void:
 
 # --- Ground -------------------------------------------------------------------------------
 
-## True where farmland/trees/houses must not go (airport grounds, lakes, steep mountain).
+## True where farmland/trees/houses must not go (both airports' grounds, lakes).
 func _blocked(x: float, z: float, margin: float) -> bool:
-	var c := FlightModel.RUNWAY_CENTER
-	if x > c.x - 650 - margin and x < c.x + 1150 + margin and z > c.z - 1250 - margin and z < c.z + 1950 + margin:
-		return true
+	for c: Vector3 in [FlightModel.RUNWAY_CENTER, FlightModel.ORIGIN_RUNWAY_CENTER]:
+		if x > c.x - 650 - margin and x < c.x + 1150 + margin and z > c.z - 1250 - margin and z < c.z + 1950 + margin:
+			return true
 	for lake in LAKES:
 		var p: Vector3 = lake[0]
 		if Vector2(x - p.x, z - p.z).length() < float(lake[1]) * 1.25 + margin:

@@ -9,7 +9,7 @@ extends RefCounted
 ## dead engines yaw/roll you toward them, a hurt wing drops, a hurt tail wobbles and
 ## loses elevator authority, hull damage adds drag.
 
-enum Phase { FLYING, ROLLING, LANDED, CRASHED }
+enum Phase { PARKED, FLYING, ROLLING, LANDED, CRASHED }
 
 const GRAVITY := 9.8
 ## Aero coefficients (accelerations per unit mass): a = K * V^2 * C.
@@ -49,32 +49,51 @@ const MAX_SINK := 5.0
 const MAX_TOUCHDOWN_ROLL := 0.26
 const MIN_TOUCHDOWN_PITCH := -0.1
 
-const START_POS := Vector3(0, 900, 0)
-const START_SPEED := 70.0
-## Runway runs along Z; land heading north (-Z). Threshold is the south (+Z) end.
-const RUNWAY_CENTER := Vector3(2400, 0, -12000)
+## Takeoff: the departure roll starts once the throttle passes TAKEOFF_THROTTLE; pulling up at
+## VR or faster lifts off at ROTATE_PITCH. Leaving the runway faster than RUNWAY_EXCURSION_SPEED
+## on the roll is a crash. A touchdown before climbing TAKEOFF_BOUNCE metres on the origin runway
+## just continues the departure roll.
+const VR := 38.0
+const TAKEOFF_THROTTLE := 0.3
+const ROTATE_PITCH := 0.12
+const RUNWAY_EXCURSION_SPEED := 12.0
+const TAKEOFF_BOUNCE := 30.0
+
+## ORIGIN airport, where every round starts parked. Runway along Z; take off heading north (-Z)
+## from the south (+Z) end.
+const ORIGIN_RUNWAY_CENTER := Vector3(2400, 0, -700)
+const ORIGIN_RUNWAY_HALF := Vector2(35, 800)
+
+## DESTINATION airport, ~26 km due north (6-8 minutes of flying). Land heading north (-Z);
+## the threshold is the south (+Z) end.
+const RUNWAY_CENTER := Vector3(2400, 0, -26000)
 const RUNWAY_HALF := Vector2(35, 800)
-## Cone mountains: [center (y ignored), radius, height].
+
+## Parked on the origin runway centreline just inside the south threshold, nose north.
+const START_POS := ORIGIN_RUNWAY_CENTER + Vector3(0, 0, ORIGIN_RUNWAY_HALF.y - 40.0)
+## Cone mountains: [center (y ignored), radius, height]. All sit beside the direct route (x = 2400).
 const MOUNTAINS := [
 	[Vector3(-2600, 0, -5200), 1500.0, 1150.0],
 	[Vector3(5200, 0, -6200), 1800.0, 1300.0],
-	[Vector3(1300, 0, -4300), 650.0, 760.0],
+	[Vector3(1300, 0, -15000), 650.0, 760.0],
 	[Vector3(-900, 0, -15500), 2200.0, 1600.0],
+	[Vector3(6600, 0, -20500), 1600.0, 1250.0],
+	[Vector3(-2600, 0, -24500), 1800.0, 1450.0],
 ]
 
-var phase := Phase.FLYING
+var phase := Phase.PARKED
 var pos := START_POS
-var velocity := Vector3(0, 0, -START_SPEED)
-var speed := START_SPEED          ## |velocity| (airspeed; no wind).
+var velocity := Vector3(0, 0, 0)
+var speed := 0.0          ## |velocity| (airspeed; no wind).
 var yaw := 0.0
-var pitch := ALPHA_TRIM
+var pitch := 0.0
 var roll := 0.0
 var pitch_rate := 0.0
 var roll_rate := 0.0
 var alpha := 0.0                  ## Angle of attack.
 var stalled := false
-var throttle := 0.57
-var gear_down := false
+var throttle := 0.0
+var gear_down := true
 var flaps := 0                    ## 0, 1, 2 notches.
 var engine_power := [1.0, 1.0]    ## 0..1 per engine; World derives from damage and fire.
 var wing_health := [1.0, 1.0]
@@ -90,7 +109,10 @@ var pitch_in := 0.0
 var roll_in := 0.0
 var throttle_in := 0.0
 
-var touchdown := {}               ## Filled on touchdown: sink, on_runway, speed, reason.
+var touchdown := {}               ## Filled on touchdown: sink, on_runway, speed, reason, at_destination.
+var departure_roll := false       ## True on the takeoff roll (ROLLING that started from PARKED).
+var parking_brake := false        ## Host: while true a PARKED plane ignores the throttle (Story sets it until the flight phase).
+var _climb_peak := 1.0e9         ## Highest altitude since the takeoff roll started (huge until then).
 var _drift_t := 0.0
 var _wobble_t := 0.0
 
@@ -105,6 +127,8 @@ func forward() -> Vector3:
 
 func step(dt: float) -> void:
 	match phase:
+		Phase.PARKED:
+			_parked(dt)
 		Phase.FLYING:
 			_fly(dt)
 		Phase.ROLLING:
@@ -128,6 +152,25 @@ func lift_coefficient(a: float) -> float:
 
 func stall_speed() -> float:
 	return sqrt(GRAVITY / (AERO_K * (CL_MAX + FLAP_CL[flaps])))
+
+## On the ground before takeoff: engines idle, no movement. Throttle is still live so the pilot
+## can spool up; once it passes TAKEOFF_THROTTLE (and the parking brake is off) the departure
+## roll starts.
+func _parked(dt: float) -> void:
+	throttle = clampf(throttle + throttle_in * THROTTLE_RATE * dt, 0.0, 1.0)
+	pos.y = 0.0
+	pitch = 0.0
+	roll = 0.0
+	pitch_rate = 0.0
+	roll_rate = 0.0
+	speed = 0.0
+	velocity = Vector3.ZERO
+	felt_accel = Vector3(0, -GRAVITY, 0)
+	felt_g = 1.0
+	if has_pilot and not parking_brake and throttle > TAKEOFF_THROTTLE:
+		departure_roll = true
+		_climb_peak = 0.0
+		phase = Phase.ROLLING
 
 
 func _fly(dt: float) -> void:
@@ -190,6 +233,7 @@ func _fly(dt: float) -> void:
 	speed = velocity.length()
 	pos += velocity * dt
 	_update_felt(accel, b)
+	_climb_peak = maxf(_climb_peak, pos.y)
 
 	if pos.y <= 0.0:
 		_touch_down()
@@ -208,7 +252,8 @@ func _update_felt(accel: Vector3, b: Basis) -> void:
 func _touch_down() -> void:
 	var sink := -velocity.y
 	pos.y = 0.0
-	touchdown = {"sink": sink, "on_runway": on_runway(pos), "speed": speed}
+	var at_dest := on_destination_runway(pos)
+	touchdown = {"sink": sink, "on_runway": on_runway(pos), "speed": speed, "at_destination": at_dest}
 	var reason := ""
 	if not gear_down:
 		reason = "landed with the wheels still up"
@@ -221,6 +266,10 @@ func _touch_down() -> void:
 	if reason != "":
 		_crash(reason)
 		return
+	# Settled back onto the origin runway right after liftoff: still the takeoff roll.
+	departure_roll = _climb_peak < TAKEOFF_BOUNCE and on_origin_runway(pos)
+	if departure_roll:
+		touchdown = {}
 	phase = Phase.ROLLING
 	roll = 0.0
 	roll_rate = 0.0
@@ -237,24 +286,51 @@ func _roll_out(dt: float) -> void:
 	if has_pilot:
 		yaw -= roll_in * STEER_RATE * clampf(speed / 10.0, 0.0, 1.0) * dt
 	var thrust: float = throttle * (engine_power[0] + engine_power[1]) * THRUST_PER_ENGINE
-	var decel := ROLL_FRICTION + AERO_K * speed * speed * CD0 + (BRAKE_DECEL if throttle < 0.05 else 0.0)
-	speed = maxf(0.0, speed + (thrust - decel) * dt)
-	velocity = Basis(Vector3.UP, yaw) * Vector3.FORWARD * speed
-	pos += velocity * dt
-	felt_accel = Vector3(0, -GRAVITY, 0) + Basis(Vector3.UP, -yaw) * Vector3.FORWARD * (decel - thrust) * FELT_COUPLING
-	felt_g = 1.0
-	# Enough lift with the nose up: you're flying again (touch-and-go).
-	if has_pilot and pitch_in > 0.3 and speed > stall_speed() * 1.1:
-		phase = Phase.FLYING
-		pitch = 0.08
-		pos.y = 0.05
+	if departure_roll:
+		# Departure roll: accelerate down the runway; chopping the throttle brakes.
+		var decel := ROLL_FRICTION + AERO_K * speed * speed * CD0 + (BRAKE_DECEL if throttle < 0.05 else 0.0)
+		speed = maxf(0.0, speed + (thrust - decel) * dt)
+		velocity = Basis(Vector3.UP, yaw) * Vector3.FORWARD * speed
+		pos += velocity * dt
+		felt_accel = Vector3(0, -GRAVITY, 0) + Basis(Vector3.UP, -yaw) * Vector3.FORWARD * (decel - thrust) * FELT_COUPLING
+		felt_g = 1.0
+		if has_pilot and pitch_in > 0.3 and speed >= VR:
+			phase = Phase.FLYING
+			pitch = ROTATE_PITCH
+			pos.y = 0.05
+			velocity.y = speed * 0.04
+			return
+		if not on_runway(pos) and speed > RUNWAY_EXCURSION_SPEED:
+			_crash("ran off the runway on the takeoff roll")
+		elif mountain_height(pos) > 2.0:
+			_crash("rolled into a mountain")
+		elif speed <= 0.5 and throttle < 0.1:
+			# Rejected takeoff: back to parked, try again.
+			speed = 0.0
+			velocity = Vector3.ZERO
+			departure_roll = false
+			phase = Phase.PARKED
 		return
-	if mountain_height(pos) > 2.0:
-		_crash("rolled into a mountain")
-	elif speed <= 0.5 and throttle < 0.1:
-		speed = 0.0
-		velocity = Vector3.ZERO
-		phase = Phase.LANDED
+	else:
+		# Arrival roll: decelerate to a stop.
+		var decel := ROLL_FRICTION + AERO_K * speed * speed * CD0 + (BRAKE_DECEL if throttle < 0.05 else 0.0)
+		speed = maxf(0.0, speed + (thrust - decel) * dt)
+		velocity = Basis(Vector3.UP, yaw) * Vector3.FORWARD * speed
+		pos += velocity * dt
+		felt_accel = Vector3(0, -GRAVITY, 0) + Basis(Vector3.UP, -yaw) * Vector3.FORWARD * (decel - thrust) * FELT_COUPLING
+		felt_g = 1.0
+		# Touch-and-go.
+		if has_pilot and pitch_in > 0.3 and speed > stall_speed() * 1.1:
+			phase = Phase.FLYING
+			pitch = 0.08
+			pos.y = 0.05
+			return
+		if mountain_height(pos) > 2.0:
+			_crash("rolled into a mountain")
+		elif speed <= 0.5 and throttle < 0.1:
+			speed = 0.0
+			velocity = Vector3.ZERO
+			phase = Phase.LANDED
 
 
 func _crash(reason: String) -> void:
@@ -266,10 +342,21 @@ func _crash(reason: String) -> void:
 	touchdown["reason"] = reason
 
 
+## On either runway (origin or destination).
 static func on_runway(p: Vector3) -> bool:
+	return on_destination_runway(p) or on_origin_runway(p)
+
+
+static func on_destination_runway(p: Vector3) -> bool:
 	return absf(p.x - RUNWAY_CENTER.x) <= RUNWAY_HALF.x and absf(p.z - RUNWAY_CENTER.z) <= RUNWAY_HALF.y
 
 
+static func on_origin_runway(p: Vector3) -> bool:
+	return absf(p.x - ORIGIN_RUNWAY_CENTER.x) <= ORIGIN_RUNWAY_HALF.x \
+		and absf(p.z - ORIGIN_RUNWAY_CENTER.z) <= ORIGIN_RUNWAY_HALF.y
+
+
+## DESTINATION runway threshold (south end, +Z): land heading north.
 static func runway_threshold() -> Vector3:
 	return RUNWAY_CENTER + Vector3(0, 0, RUNWAY_HALF.y)
 
@@ -298,8 +385,8 @@ func to_array() -> PackedFloat32Array:
 	return PackedFloat32Array([pos.x, pos.y, pos.z, yaw, pitch, roll, speed, throttle,
 		1.0 if gear_down else 0.0, phase, felt_accel.x, felt_accel.y, felt_accel.z, felt_g,
 		engine_power[0], engine_power[1], velocity.x, velocity.y, velocity.z,
-		1.0 if has_pilot else 0.0, flaps, alpha, 1.0 if stalled else 0.0])
-
+		1.0 if has_pilot else 0.0, flaps, alpha, 1.0 if stalled else 0.0,
+		1.0 if departure_roll else 0.0])
 
 func from_array(a: PackedFloat32Array) -> void:
 	pos = Vector3(a[0], a[1], a[2])
@@ -318,3 +405,4 @@ func from_array(a: PackedFloat32Array) -> void:
 	flaps = int(a[20])
 	alpha = a[21]
 	stalled = a[22] > 0.5
+	departure_roll = a[23] > 0.5
