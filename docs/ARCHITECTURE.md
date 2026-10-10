@@ -30,7 +30,7 @@ The host (peer 1) is authoritative. It simulates `FlightModel`, every networked 
 | `world.add_player_stat(peer, key, n)` | Per-player round statistics for the crew awards (keys in `Scoring.AWARDS`). |
 | `world.request(action, args)` (any peer) | Sends an action to the host, which runs `handler(peer_id, args)`. |
 
-`world.locked_doors` is a host-side `{door_name: true}` map. The cockpit door starts locked.
+`world.locked_doors` is a host-side `{door_name: true}` map (empty at round start: the players are the crew, so the cockpit is open). `world.seatbelt_sign` is synced to every peer; the pilot toggles it with [B] (`seatbelt` action, `world.set_seatbelt(on)` on the host, `plane_changed("seatbelt", on)` on every peer).
 
 **Damage changes the flight.** Engine thrust follows engine health and drops while the engine burns, and the thrust asymmetry yaws and rolls the plane. A weak wing drops. A damaged tail wobbles and loses elevator authority. Hull damage adds drag. Fires burn down engine and wing health, and a wrecked engine (health < 0.3) can catch fire by itself.
 
@@ -84,10 +84,31 @@ Group `"npc"` marks passengers: losing one counts as `passengers_lost`.
 | G | Landing gear |
 | Esc | Pause (Resume, Settings, Leave). Settings also open from the title menu and are saved by the `Settings` autoload. |
 | R | Restart (host, after the round ends) |
+| T | Push-to-talk voice chat (Settings → Voice chat: Off / Hold T / Open mic) |
+
+## Voice chat
+
+`scripts/net/voice.gd` (World module `Voice`, every peer) captures the microphone through an `AudioStreamMicrophone` on the muted `VoiceMic` bus (`AudioEffectCapture`, `audio/driver/enable_input=true`). Audio is downmixed to mono, scaled by `Settings.mic_gain`, resampled to 16 kHz and sent as 20 ms G.711 μ-law frames (`scripts/net/voice_codec.gd`: 5-byte header + 320 bytes). Clients send frames to the host (`unreliable_ordered`, channel 2); the host relays them to every other peer within ~30 m, like player state. Each remote talker plays from an `AudioStreamGenerator` on an `AudioStreamPlayer3D` on their head (25 m range) after an 80 ms jitter buffer. A billboard speaker icon shows over a talking player's name label; your own HUD shows a TALKING badge. `voice.is_talking(peer)` reports who is speaking. Without a microphone (no device, permission denied, headless) voice logs once and stays receive-only. macOS exports need a microphone usage description.
+
+## Weather
+
+`scripts/weather/weather.gd` (World module `Weather`, `world.weather`, every peer). `weather_cells.gd` places 3–5 storm cells between `FlightModel.ORIGIN_RUNWAY_CENTER` and `FlightModel.runway_threshold()`, seeded from `world.airline.flight_no` (one always sits on the route), so every peer derives the same cells without sync. `intensity_at(pos)` (0..1, full in the core, smooth falloff to the rim, calm above the cloud tops) and `current` (at the plane; 0 unless FLYING) work on every peer, as does `ahead` (index of the cell the plane enters within ~20 s, or -1).
+
+While FLYING the host adds turbulence jolts to `flight.bump` with pitch/roll kicks (loose props hop, standing players are pushed), air pockets (2–4 s near zero g, then a slam), gusts, and lightning: a bolt, screen flash and distance-delayed thunder on every peer; a hit damages the hull a little and may crack a window (a cracked window hit again breaks). TOWER warns once per cell ~20 s before entry. Host signals for other modules: `jolt(strength)`, `air_pocket(active)`; `strike(hit)` fires on every peer.
+
+Visuals (`weather_fx.gd`): one merged storm-cloud mesh and one rain-shaft mesh under `world.outside`, rain streak particles around the plane, rain on the side windows and windshield (one MultiMesh, one shader), darker sky/fog/sun inside storms. The pilot sees a heading-up radar (`weather_radar.gd`) with cells coloured by threat to the current heading (red on the path, yellow close, green clear).
+
+## Cargo
+
+`scripts/cargo/cargo_module.gd` (World module `Cargo`, `world.cargo`). When `world.airline` enters `"boarding"`, the host spawns `count` pieces per accepted cargo contract into the hold: two columns at `x = ±1.65` (the `|x| < 1` walkway stays clear), the right column stopping short of `Airliner.RAMP_LEVER`; beyond 11 pieces they stack. Every piece, hen and crocodile has meta `contract`. `cargo_report()` (host) returns contract id → `{units, delivered, condition}`: a piece counts when it still exists, isn't destroyed and is inside the hull (a loose but on-board crocodile halves the condition; a coop scores hens inside fully and loose ones by half).
+
+Pieces (`cargo_piece.gd`, kinds `luggage`, `mail`, `fragile`, `chickens`, `crocodile`, `explosive`, `mystery`; models in `cargo_looks.gd`, sounds in `cargo_sfx.gd`) lose condition on hard impacts. Fragile vases crack and shatter below 0. Impacts, throws, punches, fire and turbulence (`|flight.bump|` above 0.3 while flying) anger the coop (the door pops, 3–5 `chicken` bodies run around; drop one into its coop to return it) and the crocodile crate (the `croc` crawls to the nearest person and bites; carry it by the tail back into its crate or throw it out). Explosive barrels blow on hard hits or after a short fuse near fire (burning engine, flare, another blast): impulse, ragdolls, knockback, `world.damage_plane_at`, chain reactions. The mystery crate hums, floats, teleports or inverts gravity around itself while flying.
+
+Meta `action` = `"strap"`: [E] on a piece resting in the hold straps it down (frozen and carried with the plane, so it never slides and turbulence can't open it), [E] again unstraps, and crouch + [E] (or [E] anywhere outside the hold) picks it up through the core `grab` action.
 
 ## Round flow
 
-`FlightModel.phase` is `FLYING → ROLLING → LANDED`, or `FLYING → CRASHED`. When the round ends, the host emits `round_ended(result)` on every peer. The result is built by `Scoring.result`; it carries the per-player stats and the crew awards from `Scoring.awards` (pure; ties go to the lowest peer id), which the results screen shows as cards. `Main.restart_round()` (host only) rebuilds the World on every peer.
+`FlightModel.phase` is `PARKED → ROLLING (takeoff roll, departure_roll = true) → FLYING → ROLLING → LANDED`, or `→ CRASHED`. The round starts PARKED on the origin runway (`ORIGIN_RUNWAY_CENTER`, `START_POS`) with gear down; Story holds `flight.parking_brake` until the airline phase is `"flight"`. Throttle past `TAKEOFF_THROTTLE` starts the takeoff roll, pulling up at `VR` or faster lifts off; chopping the throttle on the roll goes back to PARKED and running off the runway at speed crashes. The destination runway (`RUNWAY_CENTER`, `runway_threshold()`) is ~26 km north; a touchdown there sets `touchdown.at_destination`. When the round ends, the host emits `round_ended(result)` on every peer. The result is built by `Scoring.result`; it carries the per-player stats and the crew awards from `Scoring.awards` (pure; ties go to the lowest peer id), which the results screen shows as cards. `Main.restart_round()` (host only) rebuilds the World on every peer.
 
 ## Dev and test commands
 
@@ -95,6 +116,8 @@ Group `"npc"` marks passengers: losing one counts as `passengers_lost`.
 godot --headless -s res://tests/run_tests.gd          # unit tests
 godot -- --host --shot=/tmp/a.png --shot-at=3 --at=0,0.1,4 --look=0,-5 --quit-after=5
 godot -- --join=127.0.0.1 --name=Bob                  # second instance
+godot -- --host --voice-test-tone                     # voice: send a 440 Hz tone instead of the mic
+godot -- --join=127.0.0.1 --voice-test-tone           # logs "[voice N] frames sent=… received=…" every 2 s
 ```
 
 In the screenshot command, `--at` is a plane-local position and `--look` is yaw and pitch in degrees.

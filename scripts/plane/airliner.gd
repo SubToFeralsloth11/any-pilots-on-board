@@ -110,6 +110,7 @@ var seats: Array[Vector3] = []         ## Passenger seat points (local, sitting 
 var seat_areas: Array[Interactable] = []
 var aisle_points: Array[Vector3] = []  ## Walkable points down the aisle (local).
 var pilot_area: Interactable
+var manifest_board: Interactable
 var damage := {}                       ## part -> health 0..1 (1 = intact). See DAMAGE_PARTS.
 
 var _mats := {}
@@ -1320,8 +1321,25 @@ func _build_galley() -> void:
 		# Upper unit against the bulkhead.
 		_int.rounded_box(Vector3(0.96, 0.8, 0.28), _at(Vector3(c.x, 1.88, -9.8)), Color(0.9, 0.91, 0.93), PAINT, 0.15)
 		_int.rounded_box(Vector3(0.36, 0.3, 0.02), _at(Vector3(c.x - 0.22 * sx, 1.98, -9.655)), DARK, GLOSS, 0.2, 8, 4)
-		_int.rounded_box(Vector3(0.24, 0.32, 0.12), _at(Vector3(c.x + 0.24 * sx, 1.62, -9.7)), DARK, GLOSS, 0.3)
 		_int.box(Vector3(0.04, 0.02, 0.005), _at(Vector3(c.x + 0.24 * sx, 1.72, -9.638)), Color(1.0, 0.3, 0.2), GLOW)
+		# Manifest board on the right galley counter (sx=1.0), facing the aisle.
+		if sx == 1.0:
+			var board_pos := Vector3(c.x - 0.4, 1.3, -9.55)
+			var board_size := Vector3(0.6, 0.7, 0.1)
+			_int.rounded_box(board_size, _at(board_pos), Color(0.15, 0.18, 0.25), MATTE, 0.08)
+			# Clipboard clip
+			_int.box(Vector3(0.08, 0.02, 0.01), _at(Vector3(board_pos.x, board_pos.y + 0.32, board_pos.z + 0.06)), Color(0.4, 0.4, 0.5), MATTE)
+			# Paper
+			_int.box(Vector3(0.45, 0.55, 0.005), _at(Vector3(board_pos.x, board_pos.y - 0.02, board_pos.z + 0.06)), Color(0.95, 0.95, 0.92), MATTE)
+			# Label
+			_label("MANIFEST", Vector3(board_pos.x, board_pos.y + 0.2, board_pos.z + 0.08), 18, Color(1, 0.8, 0.2))
+			# Interactable area
+			var area := Interactable.make(Vector3(0.7, 0.9, 0.5), "Open Manifest [E]", "", [])
+			area.local_only = true
+			area.position = board_pos
+			area.name = "ManifestBoard"
+			add_child(area)
+			manifest_board = area
 
 
 # --- Lounge -------------------------------------------------------------------------------

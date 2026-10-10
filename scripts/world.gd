@@ -37,25 +37,34 @@ const PUNCH_DV_MAX := 7.0
 const WINDOW_PUNCHES := 3
 const PART_SLOTS := 16             ## Snapshot key = net_id * PART_SLOTS + part index (0 = root).
 
+const AirlineModule := preload("res://scripts/airline/airline.gd")
 const PropsModule := preload("res://scripts/props/props_module.gd")
 const NpcModule := preload("res://scripts/npcs/npc_module.gd")
 const StoryModule := preload("res://scripts/story/story.gd")
 const FunModule := preload("res://scripts/fun/fun_module.gd")
+const VoiceModule := preload("res://scripts/net/voice.gd")
 const PingsModule := preload("res://scripts/ui/pings.gd")
 const OutsideScene := preload("res://scripts/outside/outside.gd")
 const HudScript := preload("res://scripts/ui/hud.gd")
-
+const WeatherModule := preload("res://scripts/weather/weather.gd")
+const CargoModule := preload("res://scripts/cargo/cargo_module.gd")
+ 
 var flight := FlightModel.new()
 var plane: Airliner
 var outside: Node3D
 var hud: CanvasLayer
+var airline: Node
 var props: Node
 var npcs: Node
 var story: Node
 var fun: Node
 var pings: Node
+var voice: Node
+var weather: Node
+var cargo: Node
 var objects_root: Node3D
 var players_root: Node3D
+
 
 var objects := {}          ## net_id -> Node3D
 var players := {}          ## peer_id -> Player
@@ -63,7 +72,8 @@ var names := {}            ## peer_id -> display name
 var holders := {}          ## peer_id -> held net_id (host)
 var local_player: Player
 var pilot_peer := 0
-var locked_doors := {"cockpit": true}
+var locked_doors := {}
+var seatbelt_sign := false
 var round_over := false
 var result := {}
 var stats := {"windows_broken": 0, "items_lost": 0, "passengers_lost": 0, "things_broken": 0,
@@ -97,11 +107,15 @@ func _ready() -> void:
 	players_root.name = "Players"
 	add_child(players_root)
 	_register_core_actions()
+	airline = _add_module(AirlineModule, "Airline")
 	props = _add_module(PropsModule, "Props")
 	npcs = _add_module(NpcModule, "Npcs")
 	story = _add_module(StoryModule, "Story")
 	fun = _add_module(FunModule, "Fun")
+	voice = _add_module(VoiceModule, "Voice")
 	pings = _add_module(PingsModule, "Pings")
+	weather = _add_module(WeatherModule, "Weather")
+	cargo = _add_module(CargoModule, "Cargo")
 	hud = HudScript.new()
 	hud.name = "Hud"
 	hud.set("world", self)
@@ -112,7 +126,7 @@ func _ready() -> void:
 	if is_server():
 		multiplayer.peer_disconnected.connect(_on_peer_left)
 		_add_player(1, Net.local_name)
-		for m in [props, npcs, story, fun, pings]:
+		for m in [airline, props, npcs, story, fun, pings, cargo]:
 			m.populate()
 	else:
 		_rpc_client_ready.rpc_id(1, Net.local_name)
@@ -271,6 +285,19 @@ func _rpc_plane(key: String, value: bool) -> void:
 	plane_changed.emit(key, value)
 
 
+## Host only. Pilot's seatbelt sign, on every peer.
+func set_seatbelt(on: bool) -> void:
+	for p in _ready_peers:
+		_rpc_seatbelt.rpc_id(p, on)
+	_rpc_seatbelt(on)
+
+
+@rpc("authority", "call_remote", "reliable")
+func _rpc_seatbelt(on: bool) -> void:
+	seatbelt_sign = on
+	plane_changed.emit("seatbelt", on)
+
+
 ## Host only. Breaks window i (counts it once).
 func break_window(i: int) -> void:
 	if i < 0 or i >= plane.windows.size() or plane.windows[i].broken:
@@ -362,7 +389,9 @@ func _rpc_client_ready(player_name: String) -> void:
 	var sync := {"names": names, "objects": objs, "plane": plane.get_state(), "damage": plane.damage,
 		"flight": flight.to_array(),
 		"pilot": pilot_peer, "locked": locked_doors, "holders": holders, "round_over": round_over,
-		"result": result, "story": story.get_sync() if story.has_method("get_sync") else {}}
+		"result": result, "story": story.get_sync() if story.has_method("get_sync") else {},
+		"airline": airline.get_sync() if airline != null and airline.has_method("get_sync") else {},
+		"seatbelt": seatbelt_sign}
 	_rpc_sync.rpc_id(sender, sync)
 	player_name = player_name.strip_edges().left(20)
 	if player_name == "":
@@ -390,6 +419,10 @@ func _rpc_sync(s: Dictionary) -> void:
 		_set_held(peer, s.holders[peer])
 	if story.has_method("apply_sync"):
 		story.apply_sync(s.story)
+	if airline != null and airline.has_method("apply_sync") and s.has("airline"):
+		airline.apply_sync(s.airline)
+	if s.has("seatbelt"):
+		seatbelt_sign = s.seatbelt
 	if s.round_over:
 		_rpc_round_end(s.result)
 
@@ -416,12 +449,26 @@ func _add_player(peer: int, player_name: String) -> void:
 	p.world = self
 	p.is_local = peer == multiplayer.get_unique_id()
 	players_root.add_child(p)
-	var seat: Vector3 = plane.seats[(players.size() * 9 + 3) % plane.seats.size()]
-	p.global_position = plane.to_global(seat)
+	# Crew spawn standing in the front galley (near cockpit door, spread out), NOT in passenger seats.
+	# Galley counters at x ≈ ±2.05, z ≈ -9.6. Spread players along the galley aisle.
+	var count := players.size()
+	var galley_positions := [
+		Vector3(-1.5, 0.0, -9.2),
+		Vector3(1.5, 0.0, -9.2),
+		Vector3(-1.5, 0.0, -8.5),
+		Vector3(1.5, 0.0, -8.5),
+		Vector3(0.0, 0.0, -9.5),
+		Vector3(0.0, 0.0, -8.2),
+		Vector3(-1.5, 0.0, -7.8),
+		Vector3(1.5, 0.0, -7.8),
+	]
+	var spawn_pos := plane.to_global(galley_positions[count % galley_positions.size()])
+	p.global_position = spawn_pos
 	players[peer] = p
 	if p.is_local:
 		local_player = p
-		p.sit(seat)
+		# Stand, don't sit - crew are on their feet
+		p.stand()
 
 
 func _remove_player(peer: int) -> void:
@@ -493,6 +540,10 @@ func _register_core_actions() -> void:
 		if peer == pilot_peer:
 			flight.flaps = (flight.flaps + 1) % 3
 			notify(peer, "Flaps %s" % ["UP", "HALF", "FULL"][flight.flaps]))
+	register_action("seatbelt", func(peer: int, _a: Array) -> void:
+		if peer == pilot_peer:
+			set_seatbelt(not seatbelt_sign)
+			notify(peer, "Seatbelt sign %s" % ("ON" if seatbelt_sign else "OFF")))
 
 
 func _player_near(peer: int, global_p: Vector3, reach: float) -> bool:
@@ -910,9 +961,24 @@ func _net_node(key: int) -> Node3D:
 func _check_round_end() -> void:
 	if round_over:
 		return
+	# Only end round if flight phase is LANDED/CRASHED AND airline phase is 'flight'
+	# (not during manifest or boarding)
 	if flight.phase != FlightModel.Phase.LANDED and flight.phase != FlightModel.Phase.CRASHED:
 		return
+	if airline != null:
+		var airline_phase: String = airline.phase
+		if airline_phase != "flight":
+			return
 	var r := Scoring.result(flight, stats, player_stats, names)
+	# Add airline payout if available
+	if airline != null and airline.has_method("compute_payout"):
+		var payout: Dictionary = airline.compute_payout()
+		r.payout = payout
+		# Update bank with payout total
+		if payout.has("total"):
+			airline.bank += payout.total
+		# Tell airline to persist
+		airline._on_round_end(r)
 	for p in _ready_peers:
 		_rpc_round_end.rpc_id(p, r)
 	_rpc_round_end(r)
