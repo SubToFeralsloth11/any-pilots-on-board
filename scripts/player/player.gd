@@ -400,8 +400,10 @@ func _move(dt: float) -> void:
 	velocity = Vector3(_move_vel.x + ext_vel.x, vy + ext_vel.y, _move_vel.z + ext_vel.z)
 	move_and_slide()
 	
-	if is_on_wall():
-		ext_vel = ext_vel.slide(get_wall_normal())
+	# Wedged between opposite walls the averaged normal can cancel out to zero.
+	var wall_n := get_wall_normal() if is_on_wall() else Vector3.ZERO
+	if wall_n.length_squared() > 0.01:
+		ext_vel = ext_vel.slide(wall_n.normalized())
 	
 	if is_on_floor() and ext_vel.y < 0.0:
 		ext_vel.y = 0.0

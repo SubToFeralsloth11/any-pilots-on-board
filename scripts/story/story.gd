@@ -9,7 +9,7 @@ extends Node
 ## subtitles via world.say and the objective via _rpc_objective / apply_sync.
 
 const CHAOS_FIRST := Vector2(35.0, 55.0)   ## Seconds after liftoff before the first chaos event.
-const CHAOS_GAP := Vector2(30.0, 55.0)
+const CHAOS_GAP := Vector2(45.0, 80.0)
 const COACH_GAP := 8.0          ## Minimum seconds between any two TOWER tips.
 const TIP_REPEAT := 25.0        ## Minimum seconds before the same tip again.
 const SHOUT_COOLDOWN := 1.2
