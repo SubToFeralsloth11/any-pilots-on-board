@@ -396,7 +396,11 @@ func _next_subtitle() -> void:
 	var speaker: String = s[0]
 	var col: String = SPEAKER_COLORS[absi(speaker.hash()) % SPEAKER_COLORS.size()]
 	var body := (s[1] as String).replace("[", "[lb]")
-	_subtitle.text = "[b][color=%s]%s:[/color][/b] %s" % [col, speaker.to_upper().replace("[", "[lb]"), body]
+	if speaker.strip_edges() == "":
+		# Narrator / sound-effect line: no speaker label, italic.
+		_subtitle.text = "[i]%s[/i]" % body
+	else:
+		_subtitle.text = "[b][color=%s]%s:[/color][/b] %s" % [col, speaker.to_upper().replace("[", "[lb]"), body]
 	# A backed-up queue speeds lines along so nobody is reading old news.
 	_sub_time = float(s[2]) / (1.0 + _sub_queue.size() * 0.5)
 	_subtitle_box.visible = true
