@@ -679,8 +679,13 @@ func _physics_process(dt: float) -> void:
 			flight.pos += flight.velocity * dt
 		for key in _targets:
 			var node := _net_node(key)
-			if node:
-				node.global_transform = node.global_transform.interpolate_with(_targets[key], k)
+			if node == null:
+				continue
+			var target: Transform3D = _targets[key]
+			var cur := node.global_transform
+			if cur.origin.distance_squared_to(target.origin) < 1e-6 and cur.basis.is_equal_approx(target.basis):
+				continue   # Resting objects: skip the transform write (and its physics-server sync).
+			node.global_transform = cur.interpolate_with(target, k)
 	plane.airborne = flight.phase == FlightModel.Phase.FLYING
 	plane.set_flaps(flight.flaps)
 	var felt := flight.felt_accel
@@ -858,8 +863,10 @@ func _net_node(key: int) -> Node3D:
 	var i := key % PART_SLOTS
 	if i == 0:
 		return obj
-	var nodes := _net_nodes(obj, true)
-	return nodes[i] if i < nodes.size() else null
+	if not obj.has_method("get_net_parts") or (obj.has_method("net_parts_active") and not obj.net_parts_active()):
+		return null
+	var parts: Array = obj.get_net_parts()
+	return parts[i - 1] if i - 1 < parts.size() else null
 
 
 func _check_round_end() -> void:

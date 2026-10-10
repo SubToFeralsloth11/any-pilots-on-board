@@ -11,8 +11,10 @@ const ACTIONS := {
 	"move_forward": [KEY_W], "move_back": [KEY_S], "move_left": [KEY_A], "move_right": [KEY_D],
 	"jump": [KEY_SPACE], "sprint": [KEY_SHIFT], "crouch": [KEY_CTRL, KEY_C],
 	"interact": [KEY_E], "shout": [KEY_Y], "gear": [KEY_G], "flaps": [KEY_F], "pause": [KEY_ESCAPE], "restart": [KEY_R],
-	"throw": [MOUSE_BUTTON_LEFT], "use": [MOUSE_BUTTON_RIGHT],
+	"camera": [KEY_V],
+	"throw": [MOUSE_BUTTON_LEFT], "use": [MOUSE_BUTTON_RIGHT], "ping": [MOUSE_BUTTON_MIDDLE],
 }
+const MOUSE_ACTIONS := ["throw", "use", "ping"]
 
 var world: Node3D
 var menu: Control
@@ -28,7 +30,7 @@ static func setup_input() -> void:
 		InputMap.add_action(action)
 		for code in ACTIONS[action]:
 			var ev: InputEvent
-			if action in ["throw", "use"]:
+			if action in MOUSE_ACTIONS:
 				ev = InputEventMouseButton.new()
 				ev.button_index = code
 			else:

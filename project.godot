@@ -10,6 +10,7 @@ config/features=PackedStringArray("4.7", "Forward Plus")
 [autoload]
 
 Net="*res://scripts/net.gd"
+Settings="*res://scripts/settings.gd"
 
 [display]
 
