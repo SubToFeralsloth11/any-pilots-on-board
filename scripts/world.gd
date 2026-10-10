@@ -688,7 +688,7 @@ func _update_objects() -> void:
 		if obj == null:
 			continue
 		var p := obj.global_position
-		if p.length() > LOSE_DISTANCE:
+		if (flying and p.length() > LOSE_DISTANCE) or p.y < -60.0:
 			add_stat("passengers_lost" if obj.is_in_group("npc") else "items_lost")
 			if obj.has_method("on_lost"):
 				obj.on_lost()

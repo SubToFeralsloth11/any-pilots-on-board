@@ -25,6 +25,8 @@ const STATE_INTERVAL := 1.0 / 30.0
 const PUNCH_COOLDOWN := 0.35
 const EYE_HEIGHT := 1.6
 const SEATED_EYE := 1.15
+const HAND_REST := Vector3(0.2, -0.22, -0.42)   ## Right arm rest pose in camera space.
+const PILOT_EYE := 1.5      ## High enough to see over the dashboard.
 
 const COLORS := [Color(0.95, 0.35, 0.3), Color(0.3, 0.6, 0.95), Color(0.35, 0.85, 0.4),
 	Color(0.95, 0.8, 0.25), Color(0.75, 0.4, 0.9), Color(0.95, 0.55, 0.2), Color(0.3, 0.85, 0.85),
@@ -36,7 +38,23 @@ var world: World
 var is_local := false
 var look_pitch := 0.0
 var held_id := 0
-var piloting := false
+## Set by World on every peer. Entering faces the windshield; leaving drops you beside the seat.
+var piloting := false:
+	set(value):
+		if value == piloting:
+			return
+		piloting = value
+		if not is_local or not is_inside_tree():
+			return
+		seated = false
+		if value:
+			rotation.y = 0.0
+			look_pitch = 0.0
+			head.rotation.x = 0.0
+		else:
+			global_position = world.plane.to_global(Airliner.PILOT_SEAT + Vector3(0.6, -0.4, 0.4))
+			_shape.set_deferred("disabled", false)
+
 var seated := false
 var seat_local := Vector3.ZERO
 var crouching := false
@@ -125,10 +143,10 @@ func _build_hands(color: Color) -> void:
 	_hands = Node3D.new()
 	camera.add_child(_hands)
 	var skin := Color(0.96, 0.8, 0.65)
-	_hand_l = _block(Vector3(0.11, 0.11, 0.45), Vector3(-0.28, -0.3, -0.45), color, _hands)
-	_hand_r = _block(Vector3(0.11, 0.11, 0.45), Vector3(0.28, -0.3, -0.45), color, _hands)
+	_hand_l = _block(Vector3(0.07, 0.07, 0.3), Vector3(-HAND_REST.x, HAND_REST.y, HAND_REST.z), color, _hands)
+	_hand_r = _block(Vector3(0.07, 0.07, 0.3), HAND_REST, color, _hands)
 	for h in [_hand_l, _hand_r]:
-		_block(Vector3(0.12, 0.12, 0.12), Vector3(0, 0, -0.28), skin, h)
+		_block(Vector3(0.085, 0.085, 0.085), Vector3(0, 0, -0.18), skin, h)
 		h.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 
@@ -204,7 +222,8 @@ func _physics_process(dt: float) -> void:
 		world.send_player_state([global_position, rotation.y, look_pitch, hold_point, _flags()])
 		if piloting:
 			_send_pilot_input()
-	if global_position.length() > FELL_DISTANCE:
+	# Airborne: drifting away means you fell out. On the ground you may walk off freely.
+	if (world.plane.airborne and global_position.length() > FELL_DISTANCE) or global_position.y < -60.0:
 		_start_respawn()
 
 
@@ -268,7 +287,7 @@ func _stick_to_seat(dt: float) -> void:
 	_shape.disabled = true
 	global_position = world.plane.to_global(local - Vector3(0, 0.45, 0))
 	velocity = Vector3.ZERO
-	head.position.y = move_toward(head.position.y, SEATED_EYE, dt * 4.0)
+	head.position.y = move_toward(head.position.y, PILOT_EYE if piloting else SEATED_EYE, dt * 4.0)
 	if seated and not piloting and not world.input_blocked():
 		if Input.is_action_just_pressed("jump") or Input.get_vector("move_left", "move_right", "move_forward", "move_back") != Vector2.ZERO:
 			stand()
@@ -408,13 +427,13 @@ func _animate_hands(dt: float) -> void:
 		_bob_t += dt * hv * 2.2
 	var bob := Vector3(cos(_bob_t * 0.5) * 0.025, -absf(sin(_bob_t * 0.5)) * 0.04, 0)
 	var hold := held_id != 0
-	var reach_y := -0.15 if hold else -0.3
-	var punch := sin(_punch_t / PUNCH_COOLDOWN * PI) * 0.35
-	_hand_l.position = _hand_l.position.lerp(Vector3(-0.28 + (0.08 if hold else 0.0), reach_y, -0.45 - (0.15 if hold else 0.0)) + bob, dt * 14)
-	_hand_r.position = _hand_r.position.lerp(Vector3(0.28 - (0.08 if hold else 0.0), reach_y, -0.45 - (0.15 if hold else 0.0) - punch) - bob, dt * 14)
+	var punch := sin(_punch_t / PUNCH_COOLDOWN * PI) * 0.25
+	var reach := Vector3(-0.06, 0.08, -0.1) if hold else Vector3.ZERO
+	_hand_l.position = _hand_l.position.lerp(Vector3(-HAND_REST.x - reach.x, HAND_REST.y + reach.y, HAND_REST.z + reach.z) + bob, dt * 14)
+	_hand_r.position = _hand_r.position.lerp(HAND_REST + reach + Vector3(0, 0, -punch) - bob, dt * 14)
 	if piloting:
-		_hand_l.position = _hand_l.position.lerp(Vector3(-0.2, -0.35, -0.5), dt * 10)
-		_hand_r.position = _hand_r.position.lerp(Vector3(0.2, -0.35, -0.5), dt * 10)
+		_hand_l.position = _hand_l.position.lerp(Vector3(-0.15, -0.26, -0.45), dt * 10)
+		_hand_r.position = _hand_r.position.lerp(Vector3(0.15, -0.26, -0.45), dt * 10)
 	var t := _trauma * _trauma
 	camera.h_offset = randf_range(-1, 1) * 0.08 * t
 	camera.v_offset = randf_range(-1, 1) * 0.08 * t
