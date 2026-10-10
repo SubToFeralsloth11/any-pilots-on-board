@@ -126,51 +126,86 @@ func _ready() -> void:
 
 # --- Visuals ---------------------------------------------------------------------------
 
-func _block(size: Vector3, pos: Vector3, color: Color, parent: Node3D) -> MeshInstance3D:
-	var mi := MeshInstance3D.new()
-	var bm := BoxMesh.new()
-	bm.size = size
+## Adds a primitive mesh part with its own colour.
+func _part(mesh: PrimitiveMesh, pos: Vector3, color: Color, parent: Node3D, rot := Vector3.ZERO,
+		scl := Vector3.ONE) -> MeshInstance3D:
 	var m := StandardMaterial3D.new()
 	m.albedo_color = color
-	bm.material = m
-	mi.mesh = bm
+	m.roughness = 0.7
+	mesh.material = m
+	var mi := MeshInstance3D.new()
+	mi.mesh = mesh
 	mi.position = pos
+	mi.rotation = rot
+	mi.scale = scl
 	parent.add_child(mi)
 	return mi
+
+
+static func _capsule(radius: float, height: float) -> CapsuleMesh:
+	var c := CapsuleMesh.new()
+	c.radius = radius
+	c.height = height
+	c.radial_segments = 16
+	c.rings = 4
+	return c
+
+
+static func _ball(radius: float) -> SphereMesh:
+	var s := SphereMesh.new()
+	s.radius = radius
+	s.height = radius * 2.0
+	s.radial_segments = 16
+	s.rings = 8
+	return s
 
 
 func _build_hands(color: Color) -> void:
 	_hands = Node3D.new()
 	camera.add_child(_hands)
 	var skin := Color(0.96, 0.8, 0.65)
-	_hand_l = _block(Vector3(0.07, 0.07, 0.3), Vector3(-HAND_REST.x, HAND_REST.y, HAND_REST.z), color, _hands)
-	_hand_r = _block(Vector3(0.07, 0.07, 0.3), HAND_REST, color, _hands)
+	_hand_l = _part(_capsule(0.04, 0.32), Vector3(-HAND_REST.x, HAND_REST.y, HAND_REST.z), color, _hands, Vector3(-PI / 2, 0, 0))
+	_hand_r = _part(_capsule(0.04, 0.32), HAND_REST, color, _hands, Vector3(-PI / 2, 0, 0))
 	for h in [_hand_l, _hand_r]:
-		_block(Vector3(0.085, 0.085, 0.085), Vector3(0, 0, -0.18), skin, h)
+		_part(_ball(0.05), Vector3(0, 0.18, 0), skin, h)          # Fist (capsule's +Y points forward).
+		_part(_capsule(0.047, 0.1), Vector3(0, 0.08, 0), Color.WHITE, h)   # Cuff.
 		h.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 
 func _build_body(color: Color) -> void:
-	var skin := Color(0.96, 0.8, 0.65)
+	var skin := Color(0.96, 0.8, 0.65).darkened(float(peer_id % 4) * 0.12)
+	var hair: Color = [Color(0.25, 0.15, 0.08), Color(0.95, 0.8, 0.35), Color(0.1, 0.1, 0.1), Color(0.75, 0.3, 0.15)][peer_id % 4]
+	var pants := Color(0.2, 0.22, 0.32)
 	_body_vis = Node3D.new()
 	add_child(_body_vis)
-	_block(Vector3(0.55, 0.65, 0.3), Vector3(0, 1.15, 0), color, _body_vis)
-	_block(Vector3(0.38, 0.38, 0.38), Vector3(0, 1.68, 0), skin, _body_vis)
-	_block(Vector3(0.3, 0.08, 0.05), Vector3(0, 1.72, -0.2), Color(0.1, 0.1, 0.1), _body_vis)
+	_part(_capsule(0.27, 0.78), Vector3(0, 1.15, 0), color, _body_vis, Vector3.ZERO, Vector3(1, 1, 0.75))
+	_part(_capsule(0.06, 0.3), Vector3(0, 1.3, -0.2), color.darkened(0.25), _body_vis)   # Zip line.
+	var head := Node3D.new()
+	head.position = Vector3(0, 1.72, 0)
+	_body_vis.add_child(head)
+	_part(_ball(0.21), Vector3.ZERO, skin, head)
+	_part(_ball(0.22), Vector3(0, 0.07, 0.03), hair, head, Vector3.ZERO, Vector3(1, 0.75, 1))
+	for ex in [-0.075, 0.075]:
+		_part(_ball(0.045), Vector3(ex, 0.02, -0.18), Color.WHITE, head)
+		_part(_ball(0.022), Vector3(ex, 0.02, -0.215), Color(0.08, 0.08, 0.1), head)
+	_part(_capsule(0.018, 0.1), Vector3(0, -0.09, -0.19), Color(0.5, 0.15, 0.15), head, Vector3(0, 0, PI / 2))
+	_part(_ball(0.03), Vector3(0, -0.02, -0.21), skin.darkened(0.1), head)   # Nose.
 	_legs = Node3D.new()
 	_legs.position.y = 0.82
 	_body_vis.add_child(_legs)
-	_block(Vector3(0.22, 0.8, 0.24), Vector3(-0.14, -0.4, 0), Color(0.2, 0.22, 0.3), _legs)
-	_block(Vector3(0.22, 0.8, 0.24), Vector3(0.14, -0.4, 0), Color(0.2, 0.22, 0.3), _legs)
+	for lx in [-0.13, 0.13]:
+		_part(_capsule(0.1, 0.8), Vector3(lx, -0.4, 0), pants, _legs)
+		_part(_capsule(0.08, 0.26), Vector3(lx, -0.78, -0.06), Color(0.15, 0.12, 0.1), _legs, Vector3(PI / 2, 0, 0))
 	_arms_vis = Node3D.new()
-	_arms_vis.position.y = 1.4
+	_arms_vis.position.y = 1.42
 	_body_vis.add_child(_arms_vis)
-	_block(Vector3(0.16, 0.6, 0.16), Vector3(-0.37, -0.25, 0), color, _arms_vis)
-	_block(Vector3(0.16, 0.6, 0.16), Vector3(0.37, -0.25, 0), color, _arms_vis)
+	for ax in [-0.36, 0.36]:
+		_part(_capsule(0.075, 0.62), Vector3(ax, -0.25, 0), color, _arms_vis)
+		_part(_ball(0.07), Vector3(ax, -0.57, 0), skin, _arms_vis)
 	_label = Label3D.new()
 	_label.text = display_name
 	_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	_label.position.y = 2.15
+	_label.position.y = 2.2
 	_label.font_size = 48
 	_label.outline_size = 10
 	_label.pixel_size = 0.004
@@ -197,6 +232,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		world.request("shout")
 	elif event.is_action_pressed("gear") and piloting:
 		world.request("gear")
+	elif event.is_action_pressed("flaps") and piloting:
+		world.request("flaps")
 
 
 func _physics_process(dt: float) -> void:

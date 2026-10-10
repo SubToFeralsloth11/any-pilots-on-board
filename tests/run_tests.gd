@@ -2,17 +2,24 @@ extends SceneTree
 ## Headless unit tests: godot --headless -s res://tests/run_tests.gd
 ## Exit code = number of failures.
 
+const DT := 1.0 / 60.0
+
 var _failures := 0
 
 
 func _init() -> void:
+	_test_trimmed_cruise_holds_altitude()
 	_test_gentle_runway_landing_rolls_to_a_stop()
 	_test_gear_up_touchdown_crashes()
 	_test_hard_touchdown_crashes()
 	_test_banked_touchdown_crashes()
 	_test_flying_into_mountain_crashes()
 	_test_unpiloted_plane_sinks_and_wanders()
-	_test_stall_drops_the_nose()
+	_test_slow_flight_stalls_and_drops_the_nose()
+	_test_flaps_lower_stall_speed()
+	_test_dead_engine_yaws_toward_it()
+	_test_damaged_wing_drops()
+	_test_pushover_makes_cabin_floaty()
 	_test_state_roundtrip()
 	_test_wall_spans()
 	_test_scoring()
@@ -28,52 +35,73 @@ func _check(cond: bool, what: String) -> void:
 		print("  FAIL ", what)
 
 
-func _approach(sink_pitch: float, gear: bool, roll := 0.0) -> FlightModel:
+func _sim(f: FlightModel, seconds: float) -> void:
+	for i in int(seconds / DT):
+		f.step(DT)
+
+
+## 3 m above the runway, 500 m short of its centre, descending gently on final.
+func _approach(gear: bool, sink := 1.5, roll := 0.0) -> FlightModel:
 	var f := FlightModel.new()
 	f.pos = FlightModel.RUNWAY_CENTER + Vector3(0, 3, 500)
-	f.speed = 50.0
-	f.throttle = 0.35
-	f.pitch = sink_pitch
+	f.velocity = Vector3(0, -sink, -48)
+	f.pitch = 0.04
 	f.roll = roll
+	f.flaps = 2
+	f.throttle = 0.3
 	f.gear_down = gear
 	f.has_pilot = true
 	return f
 
 
+## Runs until landed/crashed; chops the throttle after touchdown so the brakes engage.
 func _run(f: FlightModel, max_steps := 20000) -> void:
 	for i in max_steps:
 		if f.phase == FlightModel.Phase.LANDED or f.phase == FlightModel.Phase.CRASHED:
 			return
-		f.step(1.0 / 60.0)
+		if f.phase == FlightModel.Phase.ROLLING:
+			f.throttle_in = -1.0
+		f.step(DT)
+
+
+func _test_trimmed_cruise_holds_altitude() -> void:
+	var f := FlightModel.new()
+	f.has_pilot = true
+	_sim(f, 20.0)
+	_check(absf(f.pos.y - FlightModel.START_POS.y) < 80.0 and f.speed > 55.0,
+		"hands-off cruise at start throttle roughly holds altitude (%.0f m, %.0f m/s)" % [f.pos.y, f.speed])
 
 
 func _test_gentle_runway_landing_rolls_to_a_stop() -> void:
-	var f := _approach(-0.04, true)
+	var f := _approach(true)
 	_run(f)
-	_check(f.phase == FlightModel.Phase.LANDED, "gentle gear-down touchdown ends LANDED")
+	_check(f.phase == FlightModel.Phase.LANDED, "gentle gear-down touchdown ends LANDED (%s)" % f.touchdown)
 	_check(f.touchdown.get("on_runway", false), "touchdown point is on the runway")
 	_check(f.speed == 0.0, "plane rolled to a stop")
 
 
 func _test_gear_up_touchdown_crashes() -> void:
-	var f := _approach(-0.04, false)
+	var f := _approach(false)
 	_run(f)
 	_check(f.phase == FlightModel.Phase.CRASHED and "wheels" in f.touchdown.reason, "gear-up landing crashes (belly)")
 
 
 func _test_hard_touchdown_crashes() -> void:
-	var f := _approach(-0.3, true)
-	f.pos.y = 40.0
-	f.speed = 70.0
+	var f := _approach(true, 12.0)
+	f.pos.y = 30.0
+	f.velocity.z = -65.0
+	f.pitch = -0.2
+	f.pitch_in = -1.0   # Pilot shoving the nose down all the way.
 	_run(f)
-	_check(f.phase == FlightModel.Phase.CRASHED and f.touchdown.sink > FlightModel.MAX_SINK, "steep dive into ground crashes")
+	_check(f.phase == FlightModel.Phase.CRASHED and f.touchdown.sink > FlightModel.MAX_SINK, "diving into the ground crashes (%s)" % f.touchdown)
 
 
 func _test_banked_touchdown_crashes() -> void:
-	var f := _approach(-0.04, true, 0.5)
-	f.roll_in = 1.0   # Holding the bank, so it doesn't self-level.
+	var f := _approach(true, 1.0, 0.4)
+	f.pos.y = 0.01
+	f.roll_in = 1.0   # Holding the bank right onto the runway.
 	_run(f)
-	_check(f.phase == FlightModel.Phase.CRASHED and "wing" in f.touchdown.reason, "touching down in a steep bank crashes")
+	_check(f.phase == FlightModel.Phase.CRASHED and "wing" in f.touchdown.reason, "touching down in a steep bank crashes (%s)" % f.touchdown)
 
 
 func _test_flying_into_mountain_crashes() -> void:
@@ -89,22 +117,58 @@ func _test_unpiloted_plane_sinks_and_wanders() -> void:
 	var f := FlightModel.new()
 	var start_alt := f.pos.y
 	var max_bank := 0.0
-	for i in 60 * 30:
-		f.step(1.0 / 60.0)
+	for i in int(30.0 / DT):
+		f.step(DT)
 		max_bank = maxf(max_bank, absf(f.roll))
 	_check(f.pos.y < start_alt - 50.0, "nobody flying: plane loses altitude (%.0f m)" % (start_alt - f.pos.y))
 	_check(max_bank > 0.1, "nobody flying: plane drifts into a bank (%.2f rad)" % max_bank)
 
 
-func _test_stall_drops_the_nose() -> void:
+func _test_slow_flight_stalls_and_drops_the_nose() -> void:
 	var f := FlightModel.new()
 	f.has_pilot = true
-	f.speed = 20.0
 	f.throttle = 0.0
-	var before := f.pitch
-	for i in 60:
-		f.step(1.0 / 60.0)
-	_check(f.pitch < before and f.velocity.y < -5.0, "stalling drops the nose and sinks")
+	f.pitch_in = 1.0   # Hauling back on the yoke.
+	var stalled := false
+	for i in int(25.0 / DT):
+		f.step(DT)
+		stalled = stalled or f.stalled
+	_check(stalled, "pulling up with no power eventually stalls")
+	_check(f.velocity.y < -3.0, "a stalled plane sinks (vy %.1f)" % f.velocity.y)
+
+
+func _test_flaps_lower_stall_speed() -> void:
+	var f := FlightModel.new()
+	var clean := f.stall_speed()
+	f.flaps = 2
+	_check(f.stall_speed() < clean - 3.0, "full flaps lower the stall speed (%.0f -> %.0f m/s)" % [clean, f.stall_speed()])
+
+
+func _test_dead_engine_yaws_toward_it() -> void:
+	var f := FlightModel.new()
+	f.has_pilot = true
+	f.engine_power = [0.0, 1.0]   # Left engine out.
+	_sim(f, 8.0)
+	_check(f.yaw > 0.05, "left engine out: plane yaws left (yaw %.2f)" % f.yaw)
+
+
+func _test_damaged_wing_drops() -> void:
+	var f := FlightModel.new()
+	f.has_pilot = true
+	f.wing_health = [1.0, 0.2]   # Right wing shredded.
+	_sim(f, 3.0)
+	_check(f.roll > 0.2, "damaged right wing: plane rolls right (roll %.2f)" % f.roll)
+
+
+func _test_pushover_makes_cabin_floaty() -> void:
+	var f := FlightModel.new()
+	f.has_pilot = true
+	f.pitch_in = -1.0   # Shove the yoke forward.
+	var min_g := 9.0
+	for i in int(3.0 / DT):
+		f.step(DT)
+		min_g = minf(min_g, f.felt_gravity())
+	_check(min_g < 0.5, "shoving the nose down makes the cabin floaty (min %.2f g)" % min_g)
 
 
 func _test_state_roundtrip() -> void:
@@ -114,12 +178,13 @@ func _test_state_roundtrip() -> void:
 	a.pitch = -0.1
 	a.roll = 0.2
 	a.gear_down = true
+	a.flaps = 1
 	a.engine_power = [0.5, 0.9]
 	a.has_pilot = true
 	var b := FlightModel.new()
 	b.from_array(a.to_array())
 	_check(b.pos.distance_to(a.pos) < 0.01 and is_equal_approx(b.roll, a.roll) and b.gear_down and b.has_pilot \
-		and is_equal_approx(b.engine_power[0], 0.5), "flight state survives to_array/from_array")
+		and b.flaps == 1 and is_equal_approx(b.engine_power[0], 0.5), "flight state survives to_array/from_array")
 
 
 func _test_wall_spans() -> void:
@@ -130,12 +195,12 @@ func _test_wall_spans() -> void:
 
 func _test_scoring() -> void:
 	var stats := {"windows_broken": 0, "items_lost": 0, "passengers_lost": 0, "things_broken": 0, "players_fell": 0}
-	var runway := _approach(-0.04, true)
+	var runway := _approach(true)
 	_run(runway)
-	var field := _approach(-0.04, true)
+	var field := _approach(true)
 	field.pos.x += 400.0
 	_run(field)
-	var crash := _approach(-0.04, false)
+	var crash := _approach(false)
 	_run(crash)
 	var r1 := Scoring.result(runway, stats)
 	var r2 := Scoring.result(field, stats)

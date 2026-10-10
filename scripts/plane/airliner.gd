@@ -36,6 +36,8 @@ const RAMP_LEVER := Vector3(1.75, 1.2, 20.5)
 const SUCTION_BURST := 26.0
 const SUCTION_STEADY := 5.0
 const SUCTION_RANGE := 3.5
+const DAMAGE_PARTS := ["engine0", "engine1", "wing0", "wing1", "tail", "hull"]
+const MAX_SCARS := 40
 
 const HULL := Color(0.95, 0.96, 0.98)
 const TRIM := Color(0.12, 0.33, 0.78)
@@ -69,6 +71,11 @@ var _ramp_lever: Interactable
 var _gear_meshes: Array[Node3D] = []
 var _fires: Array[Node3D] = []
 var _hull_csg: CSGCombiner3D
+var damage := {}                       ## part -> health 0..1 (1 = intact). See DAMAGE_PARTS.
+var _smoke := {}                       ## part -> CPUParticles3D
+var _flap_pivots: Array[Node3D] = []
+var _flaps := -1
+var _scars: Array[Node3D] = []
 
 
 func _ready() -> void:
@@ -85,7 +92,9 @@ func _ready() -> void:
 	_build_tail()
 	_build_gear()
 	_build_lights()
+	_build_smoke()
 	set_gear(false)
+	set_flaps(0)
 
 
 # --- Public: fixtures for other modules ------------------------------------------------
@@ -245,6 +254,47 @@ func set_gear(down: bool) -> void:
 
 func set_attitude(pitch: float, roll: float) -> void:
 	transform = Transform3D(Basis.from_euler(Vector3(pitch, 0.0, -roll)), Vector3.ZERO)
+
+
+## Flap notch 0..2: trailing-edge panels droop.
+func set_flaps(notch: int) -> void:
+	if notch == _flaps:
+		return
+	_flaps = notch
+	for p in _flap_pivots:
+		p.rotation.x = notch * 0.3
+
+
+## Health 0..1 for a damage part (all peers). Smoke thickens as it drops.
+func set_damage(part: String, health: float) -> void:
+	damage[part] = health
+	var s: CPUParticles3D = _smoke[part]
+	s.emitting = health < 0.7
+	s.scale_amount_max = lerpf(4.0, 1.5, health)
+	s.color = Color(0.12, 0.12, 0.12, 0.8) if health < 0.35 else Color(0.55, 0.55, 0.55, 0.6)
+
+
+## Which damage part a world point belongs to.
+func part_at(global_p: Vector3) -> String:
+	var p := to_local(global_p)
+	var e := engine_near(global_p, 2.2)
+	if e >= 0:
+		return "engine%d" % e
+	if absf(p.x) > HULL_R + 0.1 and p.y < 1.0:
+		return "wing0" if p.x < 0.0 else "wing1"
+	if p.z > TAIL_Z - 1.0 and p.y > CEIL:
+		return "tail"
+	return "hull"
+
+
+## Cosmetic scorch/dent where something hit the plane (plane-local point).
+func add_scar(local: Vector3) -> void:
+	var s := _sphere(randf_range(0.12, 0.22), local, Color(0.1, 0.09, 0.08), Vector3(1, 1, 1) * randf_range(0.8, 1.2))
+	s.scale.y *= 0.35
+	s.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_scars.append(s)
+	if _scars.size() > MAX_SCARS:
+		_scars.pop_front().queue_free()
 
 
 # --- Construction helpers ----------------------------------------------------------------
@@ -693,7 +743,12 @@ func _build_wings() -> void:
 	for sx in [-1, 1]:
 		_box(Vector3(11.9, 0.3, 3.6), Vector3(sx * 8.05, -0.25, 0.7), HULL)
 		_cyl(0.15, 11.9, Vector3(sx * 8.05, -0.25, -1.1), Vector3.RIGHT, HULL)
-		_box(Vector3(9.0, 0.08, 0.9), Vector3(sx * 7.0, -0.32, 2.85), Color(0.85, 0.86, 0.88), false)   # Flap.
+		var pivot := Node3D.new()
+		pivot.position = Vector3(sx * 7.0, -0.3, 2.45)
+		add_child(pivot)
+		_box(Vector3(9.0, 0.08, 0.9), Vector3.ZERO, Color(0.85, 0.86, 0.88), false).reparent(pivot, false)
+		pivot.get_child(0).position = Vector3(0, 0, 0.45)
+		_flap_pivots.append(pivot)
 		_box(Vector3(11.9, 0.02, 0.2), Vector3(sx * 8.05, -0.09, -0.9), TRIM, false)
 		# Winglet.
 		var wl := _box(Vector3(0.2, 1.4, 1.4), Vector3(sx * 14.2, 0.4, 1.4), TRIM, false)
@@ -799,6 +854,44 @@ func _build_lights() -> void:
 		l.light_energy = 1.2
 		l.omni_range = 6.0
 		add_child(l)
+
+
+## One smoke trail per damage part; set_damage turns it on as health drops.
+func _build_smoke() -> void:
+	var spots := {"engine0": ENGINE_POS[0] + Vector3(0, 0.4, 1.0), "engine1": ENGINE_POS[1] + Vector3(0, 0.4, 1.0),
+		"wing0": Vector3(-9, 0, 1.5), "wing1": Vector3(9, 0, 1.5), "tail": Vector3(0, 4.5, TAIL_Z + 2.0),
+		"hull": Vector3(0, HULL_CY + HULL_R, 2.0)}
+	var puff := SphereMesh.new()
+	puff.radius = 0.3
+	puff.height = 0.6
+	puff.radial_segments = 8
+	puff.rings = 4
+	var pm := StandardMaterial3D.new()
+	pm.vertex_color_use_as_albedo = true
+	pm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	pm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	puff.material = pm
+	for part: String in spots:
+		var s := CPUParticles3D.new()
+		s.mesh = puff
+		s.amount = 30
+		s.lifetime = 2.0
+		s.local_coords = false
+		s.position = spots[part]
+		s.direction = Vector3(0, 0.3, 1)
+		s.spread = 15.0
+		s.gravity = Vector3(0, 0.5, 14)   # Streams back in the slipstream.
+		s.initial_velocity_min = 2.0
+		s.initial_velocity_max = 4.0
+		s.scale_amount_min = 0.8
+		var fade := Curve.new()
+		fade.add_point(Vector2(0, 0.5))
+		fade.add_point(Vector2(1, 1.0))
+		s.scale_amount_curve = fade
+		s.emitting = false
+		add_child(s)
+		_smoke[part] = s
+		damage[part] = 1.0
 
 
 ## Cosmetic shard burst (all peers).

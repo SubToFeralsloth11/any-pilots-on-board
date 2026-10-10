@@ -9,7 +9,7 @@ const WorldScript := preload("res://scripts/world.gd")
 const ACTIONS := {
 	"move_forward": [KEY_W], "move_back": [KEY_S], "move_left": [KEY_A], "move_right": [KEY_D],
 	"jump": [KEY_SPACE], "sprint": [KEY_SHIFT], "crouch": [KEY_CTRL, KEY_C],
-	"interact": [KEY_E], "shout": [KEY_Y], "gear": [KEY_G], "pause": [KEY_ESCAPE], "restart": [KEY_R],
+	"interact": [KEY_E], "shout": [KEY_Y], "gear": [KEY_G], "flaps": [KEY_F], "pause": [KEY_ESCAPE], "restart": [KEY_R],
 	"throw": [MOUSE_BUTTON_LEFT], "use": [MOUSE_BUTTON_RIGHT],
 }
 
@@ -86,23 +86,93 @@ func _dev_shot(args: Dictionary) -> void:
 func _build_menu() -> void:
 	menu = Control.new()
 	menu.set_anchors_preset(Control.PRESET_FULL_RECT)
+	var style := func(color: Color, radius: int, pad: float) -> StyleBoxFlat:
+		var s := StyleBoxFlat.new()
+		s.bg_color = color
+		s.set_corner_radius_all(radius)
+		s.content_margin_left = pad
+		s.content_margin_right = pad
+		s.content_margin_top = pad * 0.6
+		s.content_margin_bottom = pad * 0.6
+		return s
+	var theme := Theme.new()
+	theme.default_font_size = 19
+	theme.set_color("font_color", "Label", Color(0.1, 0.15, 0.35))
+	theme.set_stylebox("normal", "LineEdit", style.call(Color(1, 1, 1, 0.95), 10, 12.0))
+	theme.set_stylebox("focus", "LineEdit", style.call(Color(1, 0.9, 0.5, 0.35), 10, 12.0))
+	theme.set_color("font_color", "LineEdit", Color(0.1, 0.15, 0.35))
+	for state in ["normal", "hover", "pressed", "focus"]:
+		var col: Color = {"normal": Color(0.2, 0.45, 0.95), "hover": Color(0.3, 0.58, 1.0),
+			"pressed": Color(0.95, 0.6, 0.15), "focus": Color(0.2, 0.45, 0.95)}[state]
+		var sb: StyleBoxFlat = style.call(col, 14, 16.0)
+		sb.shadow_color = Color(0.05, 0.1, 0.3, 0.35)
+		sb.shadow_offset = Vector2(0, 4)
+		sb.shadow_size = 2
+		if state == "focus":
+			sb.draw_center = false
+			sb.border_color = Color(1, 0.85, 0.2)
+			sb.set_border_width_all(3)
+		theme.set_stylebox(state, "Button", sb)
+	theme.set_font_size("font_size", "Button", 22)
+	theme.set_color("font_outline_color", "Button", Color(0.05, 0.1, 0.3))
+	theme.set_constant("outline_size", "Button", 5)
+	menu.theme = theme
 	add_child(menu)
-	var bg := ColorRect.new()
-	bg.color = Color(0.45, 0.7, 0.95)
-	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
-	menu.add_child(bg)
+	# Cartoon sky with blocky clouds and a strip of farmland.
+	var sky := TextureRect.new()
+	var grad := GradientTexture2D.new()
+	grad.gradient = Gradient.new()
+	grad.gradient.set_color(0, Color(0.2, 0.5, 0.95))
+	grad.gradient.set_color(1, Color(0.72, 0.88, 1.0))
+	grad.fill_from = Vector2(0, 0)
+	grad.fill_to = Vector2(0, 1)
+	sky.texture = grad
+	sky.stretch_mode = TextureRect.STRETCH_SCALE
+	sky.set_anchors_preset(Control.PRESET_FULL_RECT)
+	menu.add_child(sky)
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 42
+	for i in 9:
+		var cloud := Control.new()
+		cloud.anchor_left = rng.randf_range(-0.05, 0.9)
+		cloud.anchor_top = rng.randf_range(0.05, 0.6)
+		cloud.modulate.a = rng.randf_range(0.7, 0.95)
+		menu.add_child(cloud)
+		var s := rng.randf_range(0.6, 1.4)
+		for part in [Rect2(0, 20, 160, 40), Rect2(25, 0, 70, 30), Rect2(80, 6, 60, 26)]:
+			var r := ColorRect.new()
+			r.position = part.position * s
+			r.size = part.size * s
+			cloud.add_child(r)
+	var ground := HBoxContainer.new()
+	ground.anchor_top = 0.86
+	ground.anchor_right = 1.0
+	ground.anchor_bottom = 1.0
+	ground.add_theme_constant_override("separation", 0)
+	menu.add_child(ground)
+	for c in [Color(0.55, 0.8, 0.3), Color(0.93, 0.82, 0.32), Color(0.36, 0.66, 0.26), Color(0.62, 0.44, 0.27),
+			Color(0.78, 0.86, 0.38), Color(0.98, 0.66, 0.25), Color(0.45, 0.75, 0.5)]:
+		var field := ColorRect.new()
+		field.color = c
+		field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		ground.add_child(field)
+	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", style.call(Color(1, 1, 1, 0.82), 22, 28.0))
+	panel.set_anchors_preset(Control.PRESET_CENTER)
+	panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	panel.grow_vertical = Control.GROW_DIRECTION_BOTH
+	menu.add_child(panel)
 	var box := VBoxContainer.new()
-	box.set_anchors_preset(Control.PRESET_CENTER)
-	box.custom_minimum_size = Vector2(460, 0)
-	box.position = Vector2(-230, -220)
+	box.custom_minimum_size = Vector2(480, 0)
 	box.add_theme_constant_override("separation", 10)
-	menu.add_child(box)
+	panel.add_child(box)
 	var title := Label.new()
 	title.text = "ANY PILOTS ON BOARD?"
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.add_theme_font_size_override("font_size", 44)
+	title.add_theme_font_size_override("font_size", 46)
+	title.add_theme_color_override("font_color", Color(1, 0.84, 0.2))
 	title.add_theme_color_override("font_outline_color", Color(0.1, 0.15, 0.35))
-	title.add_theme_constant_override("outline_size", 12)
+	title.add_theme_constant_override("outline_size", 16)
 	box.add_child(title)
 	var sub := Label.new()
 	sub.text = "The pilot passed out. You said you could fly. You can't."
@@ -126,6 +196,7 @@ func _build_menu() -> void:
 	_status = Label.new()
 	_status.autowrap_mode = TextServer.AUTOWRAP_WORD
 	_status.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_status.custom_minimum_size.x = 480
 	box.add_child(_status)
 	var ips := Net.lan_addresses()
 	if not ips.is_empty():
@@ -135,9 +206,11 @@ func _build_menu() -> void:
 func _field(parent: Control, label: String, value: String) -> LineEdit:
 	var l := Label.new()
 	l.text = label
+	l.add_theme_font_size_override("font_size", 15)
 	parent.add_child(l)
 	var e := LineEdit.new()
 	e.text = value
+	e.custom_minimum_size.y = 40
 	parent.add_child(e)
 	return e
 

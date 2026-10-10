@@ -24,6 +24,7 @@ const HOLD_SNAP := 3.5             ## Held object torn away beyond this distance
 const THROW_SPEED := 15.0
 const HEAVY_MASS := 30.0
 const WINDOW_PUNCHES := 3
+const PART_SLOTS := 16             ## Snapshot key = net_id * PART_SLOTS + part index (0 = root).
 
 const PropsModule := preload("res://scripts/props/props_module.gd")
 const NpcModule := preload("res://scripts/npcs/npc_module.gd")
@@ -211,21 +212,24 @@ func _create_object(id: int, kind: String, xform: Transform3D, extra: Dictionary
 	obj.set_meta("net_id", id)
 	obj.set_meta("kind", kind)
 	obj.set_meta("extra", extra)
-	if obj is RigidBody3D and not is_server():
-		obj.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
-		obj.freeze = true
 	objects_root.add_child(obj)
 	obj.global_transform = xform
 	objects[id] = obj
-	_targets[id] = xform
+	_targets[id * PART_SLOTS] = xform
+	if not is_server():
+		for node in _net_nodes(obj):
+			if node is RigidBody3D:
+				node.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+				node.freeze = true
 	return obj
 
 
 func _remove_object(id: int) -> void:
 	var obj: Node3D = objects.get(id)
 	objects.erase(id)
-	_targets.erase(id)
-	_last_sent.erase(id)
+	for i in PART_SLOTS:
+		_targets.erase(id * PART_SLOTS + i)
+		_last_sent.erase(id * PART_SLOTS + i)
 	for peer in holders.keys():
 		if holders[peer] == id:
 			_set_held(peer, 0)
@@ -330,7 +334,8 @@ func _rpc_client_ready(player_name: String) -> void:
 		var o: Node3D = objects[id]
 		var extra: Dictionary = o.get_spawn_extra() if o.has_method("get_spawn_extra") else o.get_meta("extra")
 		objs.append([id, o.get_meta("kind"), o.global_transform, extra])
-	var sync := {"names": names, "objects": objs, "plane": plane.get_state(), "flight": flight.to_array(),
+	var sync := {"names": names, "objects": objs, "plane": plane.get_state(), "damage": plane.damage,
+		"flight": flight.to_array(),
 		"pilot": pilot_peer, "locked": locked_doors, "holders": holders, "round_over": round_over,
 		"result": result, "story": story.get_sync() if story.has_method("get_sync") else {}}
 	_rpc_sync.rpc_id(sender, sync)
@@ -351,6 +356,8 @@ func _rpc_sync(s: Dictionary) -> void:
 	for o in s.objects:
 		_create_object(o[0], o[1], o[2], o[3])
 	plane.apply_state(s.plane)
+	for part in s.damage:
+		plane.set_damage(part, s.damage[part])
 	flight.from_array(s.flight)
 	locked_doors = s.locked
 	_set_pilot(s.pilot)
@@ -457,6 +464,10 @@ func _register_core_actions() -> void:
 	register_action("gear", _act_gear)
 	register_action("fell_out", _act_fell_out)
 	register_action("use_item", _act_use_item)
+	register_action("flaps", func(peer: int, _a: Array) -> void:
+		if peer == pilot_peer:
+			flight.flaps = (flight.flaps + 1) % 3
+			notify(peer, "Flaps %s" % ["UP", "HALF", "FULL"][flight.flaps]))
 
 
 func _player_near(peer: int, global_p: Vector3, reach: float) -> bool:
@@ -651,8 +662,8 @@ func _rpc_held(peer: int, id: int) -> void:
 
 func _physics_process(dt: float) -> void:
 	if is_server():
+		_update_damage(dt)
 		flight.step(dt)
-		_update_engines(dt)
 		plane.set_attitude(flight.pitch, flight.roll)
 		_update_objects()
 		_send_snapshots(dt)
@@ -664,15 +675,18 @@ func _physics_process(dt: float) -> void:
 		plane.set_attitude(_att.x, _att.y)
 		if flight.phase == FlightModel.Phase.FLYING or flight.phase == FlightModel.Phase.ROLLING:
 			flight.pos += flight.velocity * dt
-		for id in _targets:
-			var obj: Node3D = objects.get(id)
-			if obj:
-				obj.global_transform = obj.global_transform.interpolate_with(_targets[id], k)
+		for key in _targets:
+			var node := _net_node(key)
+			if node:
+				node.global_transform = node.global_transform.interpolate_with(_targets[key], k)
 	plane.airborne = flight.phase == FlightModel.Phase.FLYING
-	PhysicsServer3D.area_set_param(get_world_3d().space, PhysicsServer3D.AREA_PARAM_GRAVITY,
-		FlightModel.GRAVITY * flight.felt_gravity())
+	plane.set_flaps(flight.flaps)
+	var felt := flight.felt_accel
+	var space := get_world_3d().space
+	PhysicsServer3D.area_set_param(space, PhysicsServer3D.AREA_PARAM_GRAVITY, felt.length())
+	if felt.length_squared() > 0.0001:
+		PhysicsServer3D.area_set_param(space, PhysicsServer3D.AREA_PARAM_GRAVITY_VECTOR, felt.normalized())
 	_apply_outside_transform()
-
 
 
 func _apply_outside_transform() -> void:
@@ -680,17 +694,72 @@ func _apply_outside_transform() -> void:
 	outside.transform = view.affine_inverse()
 
 
-func _update_engines(dt: float) -> void:
+# --- Plane damage (host) --------------------------------------------------------------------
+
+const BURN_ENGINE := 0.025         ## Engine health lost per second while burning.
+const BURN_WING := 0.008
+const AUTO_FIRE_HEALTH := 0.3      ## Engines this hurt may catch fire on their own.
+const AUTO_FIRE_CHANCE := 0.02     ## Per second.
+const DAMAGE_SYNC_STEP := 0.02     ## Health change that triggers a network update.
+
+var _damage_sent := {}
+
+
+## Host only. Positive amount damages, negative repairs. Parts: Airliner.DAMAGE_PARTS.
+func damage_plane(part: String, amount: float) -> void:
+	if not plane.damage.has(part):
+		return
+	var h := clampf(float(plane.damage[part]) - amount, 0.0, 1.0)
+	plane.set_damage(part, h)
+	var sent := float(_damage_sent.get(part, 1.0))
+	if absf(h - sent) >= DAMAGE_SYNC_STEP or ((h == 0.0 or h == 1.0) and h != sent):
+		_damage_sent[part] = h
+		for p in _ready_peers:
+			_rpc_damage.rpc_id(p, part, h)
+
+
+## Host only. Damages whatever part of the plane is at a world point (breaking a window
+## if one is right there) and leaves a scorch mark. Returns the part name.
+func damage_plane_at(global_p: Vector3, amount: float) -> String:
+	var w := plane.window_near(global_p, 0.8)
+	if w >= 0 and not plane.windows[w].broken:
+		break_window(w)
+	var part := plane.part_at(global_p)
+	damage_plane(part, amount)
+	var local := plane.to_local(global_p)
+	for p in _ready_peers:
+		_rpc_scar.rpc_id(p, local)
+	_rpc_scar(local)
+	return part
+
+
+@rpc("authority", "call_remote", "reliable")
+func _rpc_damage(part: String, health: float) -> void:
+	plane.set_damage(part, health)
+
+
+@rpc("authority", "call_remote", "reliable")
+func _rpc_scar(local: Vector3) -> void:
+	plane.add_scar(local)
+
+
+## Fires burn engines and wings down; wrecked engines flame out or catch fire.
+func _update_damage(dt: float) -> void:
 	for i in 2:
-		if plane.engine_fire[i]:
-			flight.engine_power[i] = maxf(0.15, flight.engine_power[i] - 0.04 * dt)
-		else:
-			flight.engine_power[i] = minf(1.0, flight.engine_power[i] + 0.01 * dt)
-
-
-## Host only. Wrench repairs, extinguishers etc.
-func repair_engine(i: int, amount: float) -> void:
-	flight.engine_power[i] = minf(1.0, flight.engine_power[i] + amount)
+		var engine := "engine%d" % i
+		var burning: bool = plane.engine_fire[i]
+		if burning:
+			damage_plane(engine, BURN_ENGINE * dt)
+			damage_plane("wing%d" % i, BURN_WING * dt)
+		elif plane.damage[engine] < AUTO_FIRE_HEALTH and plane.damage[engine] > 0.0 \
+				and flight.phase == FlightModel.Phase.FLYING and randf() < AUTO_FIRE_CHANCE * dt:
+			set_plane("fire:%d" % i, true)
+			say("TOWER", "Your %s engine is ON FIRE. That's... not ideal." % ["left", "right"][i], 3.5)
+		var health := float(plane.damage[engine])
+		flight.engine_power[i] = 0.0 if health < 0.15 else clampf(health * 1.25, 0.0, 1.0) * (0.6 if burning else 1.0)
+	flight.wing_health = [plane.damage.wing0, plane.damage.wing1]
+	flight.tail_health = plane.damage.tail
+	flight.hull_health = plane.damage.hull
 
 
 func _update_objects() -> void:
@@ -736,32 +805,59 @@ func _send_snapshots(dt: float) -> void:
 	var full := _full_t >= FULL_SNAPSHOT_INTERVAL
 	if full:
 		_full_t = 0.0
-	var ids := PackedInt32Array()
+	var keys := PackedInt32Array()
 	var xf := PackedFloat32Array()
 	for id in objects:
-		var obj: Node3D = objects[id]
-		var t := obj.global_transform
-		var last: Variant = _last_sent.get(id)
-		if not full and last != null and (last as Transform3D).origin.distance_squared_to(t.origin) < 0.0001 \
-				and (last as Transform3D).basis.get_rotation_quaternion().angle_to(t.basis.get_rotation_quaternion()) < 0.01:
-			continue
-		_last_sent[id] = t
-		var q := t.basis.get_rotation_quaternion()
-		ids.append(id)
-		xf.append_array([t.origin.x, t.origin.y, t.origin.z, q.x, q.y, q.z, q.w])
+		var nodes := _net_nodes(objects[id], true)
+		for i in nodes.size():
+			var key: int = id * PART_SLOTS + i
+			var t := nodes[i].global_transform
+			var last: Variant = _last_sent.get(key)
+			if not full and last != null and (last as Transform3D).origin.distance_squared_to(t.origin) < 0.0001 \
+					and (last as Transform3D).basis.get_rotation_quaternion().angle_to(t.basis.get_rotation_quaternion()) < 0.01:
+				continue
+			_last_sent[key] = t
+			var q := t.basis.get_rotation_quaternion()
+			keys.append(key)
+			xf.append_array([t.origin.x, t.origin.y, t.origin.z, q.x, q.y, q.z, q.w])
 	var f := flight.to_array()
 	for p in _ready_peers:
-		_rpc_snapshot.rpc_id(p, f, ids, xf)
+		_rpc_snapshot.rpc_id(p, f, keys, xf)
 
 
 @rpc("authority", "call_remote", "unreliable_ordered")
-func _rpc_snapshot(f: PackedFloat32Array, ids: PackedInt32Array, xf: PackedFloat32Array) -> void:
+func _rpc_snapshot(f: PackedFloat32Array, keys: PackedInt32Array, xf: PackedFloat32Array) -> void:
 	flight.from_array(f)
 	_target_att = Vector2(flight.pitch, flight.roll)
-	for i in ids.size():
+	for i in keys.size():
 		var o := i * 7
 		var q := Quaternion(xf[o + 3], xf[o + 4], xf[o + 5], xf[o + 6])
-		_targets[ids[i]] = Transform3D(Basis(q), Vector3(xf[o], xf[o + 1], xf[o + 2]))
+		_targets[keys[i]] = Transform3D(Basis(q), Vector3(xf[o], xf[o + 1], xf[o + 2]))
+
+
+## Root body plus ragdoll parts (get_net_parts). With active_only, parts are skipped
+## while the object reports net_parts_active() == false (e.g. an NPC sitting calmly).
+func _net_nodes(obj: Node3D, active_only := false) -> Array[Node3D]:
+	var out: Array[Node3D] = [obj]
+	if obj.has_method("get_net_parts"):
+		if active_only and obj.has_method("net_parts_active") and not obj.net_parts_active():
+			return out
+		for part in obj.get_net_parts():
+			if out.size() < PART_SLOTS:
+				out.append(part)
+	return out
+
+
+## Snapshot key -> node (root when key % PART_SLOTS == 0, else that ragdoll part).
+func _net_node(key: int) -> Node3D:
+	var obj: Node3D = objects.get(key / PART_SLOTS)
+	if obj == null:
+		return null
+	var i := key % PART_SLOTS
+	if i == 0:
+		return obj
+	var nodes := _net_nodes(obj, true)
+	return nodes[i] if i < nodes.size() else null
 
 
 func _check_round_end() -> void:
