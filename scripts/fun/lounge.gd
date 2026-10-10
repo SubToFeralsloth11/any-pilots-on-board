@@ -1,19 +1,20 @@
 extends RefCounted
 ## Static lounge furniture and decor, plus the galley's emergency shelves (identical on every
 ## peer, built in setup()).
-## Layout (plane-local, the lounge spans x -1.9..1.9, z 6.2..11.8; |x| < 0.8 stays clear):
+## Layout (plane-local, the lounge spans x -2.5..2.5, z 6.2..11.8; |x| < 1.2 stays clear):
 ##   left wall:  booth A (z 6.5..8.1), booth B (z 8.5..10.1), lavatory (z 10.4..11.85)
 ##   right wall: weapons rack on the cabin bulkhead, bar (z 6.8..8.3), tall plant, vending,
 ##               slot machine and jukebox (stations), cargo-side corner
 ##   bulkheads:  TV (cabin side, left), hoop + dartboard face into the cargo hold.
 
 const BOOTHS := [7.3, 9.3]          ## Table centre z for booth A and B.
-const TABLE := Vector3(-1.38, 0.72, 0.0)
+const TABLE := Vector3(-1.98, 0.72, 0.0)
 const TABLE_SIZE := Vector2(0.95, 0.72)
 const BAR_Z := Vector2(6.85, 8.3)
-const BAR_X := 1.55
+const BAR_X := 2.15
 const BAR_TOP := 1.05
-const STOOL_X := 1.08
+const STOOL_X := 1.68
+const RACK_X := 2.0
 const RACK_Z := 6.1
 const RACK_SHELVES := [0.62, 1.12, 1.62]
 const VELVET := Color(0.55, 0.12, 0.2)
@@ -28,10 +29,10 @@ static func build(plane: Airliner) -> void:
 		_booth(plane, root, z)
 	_bar(plane, root)
 	_rack(plane, root)
-	_plant(plane, root, Vector3(1.62, 0, 8.6), 1.0)
-	_plant(plane, root, Vector3(1.66, BAR_TOP, 6.98), 0.45)
-	_hanging_plant(root, Vector3(-1.55, 2.45, 8.3))
-	_hanging_plant(root, Vector3(1.55, 2.45, 10.0))
+	_plant(plane, root, Vector3(2.22, 0, 8.6), 1.0)
+	_plant(plane, root, Vector3(2.26, BAR_TOP, 6.98), 0.45)
+	_hanging_plant(root, Vector3(-2.1, 2.62, 8.3))
+	_hanging_plant(root, Vector3(2.1, 2.62, 10.0))
 	_decor(root)
 	_lights(root)
 	_rug(root)
@@ -43,7 +44,7 @@ static func _booth(plane: Airliner, root: Node3D, z: float) -> void:
 	var velvet_dark := FunLooks.mat(VELVET_DARK, 0.9)
 	var wood := FunLooks.mat(FunLooks.WOOD, 0.45)
 	var brass := FunLooks.metal(FunLooks.BRASS)
-	var x0 := -1.38
+	var x0 := TABLE.x
 	# Table: rounded wood top with a brass edge on a pedestal.
 	FunLooks.rounded_box(root, Vector3(TABLE_SIZE.x, 0.05, TABLE_SIZE.y), 0.025, wood, Vector3(x0, TABLE.y - 0.025, z))
 	FunLooks.part(root, FunLooks.box(Vector3(TABLE_SIZE.x - 0.04, 0.012, 0.012)), brass, Vector3(x0, TABLE.y - 0.03, z + TABLE_SIZE.y / 2))
@@ -69,7 +70,7 @@ static func _booth(plane: Airliner, root: Node3D, z: float) -> void:
 			seat.position = Vector3(x0 + sx + 0.1, 0.62, bz)
 			plane.add_area(seat)
 	# Little table lamp with a fringed shade.
-	var lamp := Vector3(-1.75, TABLE.y, z + 0.22)
+	var lamp := Vector3(TABLE.x - 0.37, TABLE.y, z + 0.22)
 	FunLooks.part(root, FunLooks.cyl(0.035, 0.05, 0.03), brass, lamp + Vector3(0, 0.015, 0))
 	FunLooks.part(root, FunLooks.cyl(0.008, 0.008, 0.2), brass, lamp + Vector3(0, 0.12, 0))
 	FunLooks.part(root, FunLooks.cyl(0.04, 0.08, 0.09), FunLooks.mat(Color(1, 0.85, 0.55), 0.8, 0.0, 0.8), lamp + Vector3(0, 0.25, 0))
@@ -98,7 +99,7 @@ static func _bar(plane: Airliner, root: Node3D) -> void:
 	# Bottle shelf on the wall behind the bar.
 	for h in [1.45, 1.8]:
 		FunLooks.part(root, FunLooks.box(Vector3(0.14, 0.025, length - 0.2)), FunLooks.mat(FunLooks.WOOD, 0.5),
-			Vector3(1.88, h, zmid))
+			Vector3(2.68, h, zmid))
 		for i in 7:
 			var c: Color = [Color(0.2, 0.6, 0.3, 0.8), Color(0.6, 0.3, 0.15, 0.8), Color(0.9, 0.9, 0.95, 0.6),
 				Color(0.3, 0.3, 0.8, 0.8)][(i + int(h * 10)) % 4]
@@ -106,9 +107,9 @@ static func _bar(plane: Airliner, root: Node3D) -> void:
 			if absf(bz - 7.5) < 0.38:
 				continue   # Leave the window clear.
 			var bh := 0.16 + 0.05 * float((i * 7) % 3)
-			FunLooks.part(root, FunLooks.cyl(0.03, 0.035, bh, 10), FunLooks.mat(c, 0.1), Vector3(1.88, h + 0.0125 + bh / 2, bz))
-			FunLooks.part(root, FunLooks.cyl(0.012, 0.025, 0.06, 8), FunLooks.mat(c, 0.1), Vector3(1.88, h + bh + 0.04, bz))
-			FunLooks.part(root, FunLooks.cyl(0.013, 0.013, 0.02, 8), FunLooks.mat(Color(0.8, 0.15, 0.1)), Vector3(1.88, h + bh + 0.08, bz))
+			FunLooks.part(root, FunLooks.cyl(0.03, 0.035, bh, 10), FunLooks.mat(c, 0.1), Vector3(2.68, h + 0.0125 + bh / 2, bz))
+			FunLooks.part(root, FunLooks.cyl(0.012, 0.025, 0.06, 8), FunLooks.mat(c, 0.1), Vector3(2.68, h + bh + 0.04, bz))
+			FunLooks.part(root, FunLooks.cyl(0.013, 0.013, 0.02, 8), FunLooks.mat(Color(0.8, 0.15, 0.1)), Vector3(2.68, h + bh + 0.08, bz))
 	# Bar stools: chrome stem, footrest ring, padded round seat.
 	for i in 3:
 		var sz: float = BAR_Z.x + 0.28 + i * 0.5
@@ -127,14 +128,14 @@ static func _bar(plane: Airliner, root: Node3D) -> void:
 		plane.add_area(seat)
 	# Countertop clutter: a cocktail with an umbrella and a tip jar.
 	var glass := FunLooks.mat(Color(0.8, 0.95, 1, 0.45), 0.05)
-	var c0 := Vector3(1.55, BAR_TOP, 8.05)
+	var c0 := Vector3(BAR_X, BAR_TOP, 8.05)
 	FunLooks.part(root, FunLooks.cyl(0.04, 0.008, 0.07, 12), glass, c0 + Vector3(0, 0.12, 0))
 	FunLooks.part(root, FunLooks.cyl(0.006, 0.006, 0.08, 6), glass, c0 + Vector3(0, 0.045, 0))
 	FunLooks.part(root, FunLooks.cyl(0.03, 0.03, 0.006, 12), glass, c0 + Vector3(0, 0.005, 0))
 	FunLooks.part(root, FunLooks.cyl(0.035, 0.035, 0.03, 12), FunLooks.mat(Color(1, 0.5, 0.3, 0.8), 0.1), c0 + Vector3(0, 0.135, 0))
 	FunLooks.part(root, FunLooks.cyl(0.0, 0.06, 0.03, 10), FunLooks.mat(Color(0.2, 0.8, 0.9)), c0 + Vector3(0.03, 0.22, 0), Vector3(0, 0, -0.4))
 	FunLooks.part(root, FunLooks.cyl(0.003, 0.003, 0.1, 4), FunLooks.mat(FunLooks.WOOD_LIGHT), c0 + Vector3(0.015, 0.17, 0), Vector3(0, 0, -0.4))
-	var jar := Vector3(1.6, BAR_TOP, 7.38)
+	var jar := Vector3(BAR_X + 0.05, BAR_TOP, 7.38)
 	FunLooks.part(root, FunLooks.cyl(0.05, 0.05, 0.12, 14), glass, jar + Vector3(0, 0.06, 0))
 	FunLooks.part(root, FunLooks.sphere(0.035, 8), FunLooks.mat(Color(0.4, 0.75, 0.35)), jar + Vector3(0, 0.03, 0), Vector3.ZERO, Vector3(1, 0.5, 1))
 	FunLooks.label(root, "TIPS\n(please)", jar + Vector3(-0.055, 0.07, 0), 14, Color(1, 1, 1), Vector3(0, -PI / 2, 0))
@@ -144,16 +145,16 @@ static func _bar(plane: Airliner, root: Node3D) -> void:
 static func _rack(plane: Airliner, root: Node3D) -> void:
 	var wood := FunLooks.mat(FunLooks.WOOD, 0.5)
 	var red := FunLooks.mat(Color(0.8, 0.12, 0.12), 0.4)
-	FunLooks.rounded_box(root, Vector3(1.0, 1.55, 0.04), 0.03, FunLooks.mat(Color(0.2, 0.22, 0.26), 0.6), Vector3(1.4, 1.2, RACK_Z))
+	FunLooks.rounded_box(root, Vector3(1.0, 1.55, 0.04), 0.03, FunLooks.mat(Color(0.2, 0.22, 0.26), 0.6), Vector3(RACK_X, 1.2, RACK_Z))
 	for h: float in RACK_SHELVES:
-		FunLooks.rounded_box(root, Vector3(1.0, 0.035, 0.3), 0.015, wood, Vector3(1.4, h - 0.0175, RACK_Z + 0.15))
-		FunLooks.part(root, FunLooks.box(Vector3(1.0, 0.05, 0.015)), red, Vector3(1.4, h + 0.025, RACK_Z + 0.3))
-		FunLooks.collider(plane, Vector3(1.0, 0.035, 0.3), Transform3D(Basis.IDENTITY, Vector3(1.4, h - 0.0175, RACK_Z + 0.15)))
-		FunLooks.collider(plane, Vector3(1.0, 0.06, 0.02), Transform3D(Basis.IDENTITY, Vector3(1.4, h + 0.03, RACK_Z + 0.3)))
+		FunLooks.rounded_box(root, Vector3(1.0, 0.035, 0.3), 0.015, wood, Vector3(RACK_X, h - 0.0175, RACK_Z + 0.15))
+		FunLooks.part(root, FunLooks.box(Vector3(1.0, 0.05, 0.015)), red, Vector3(RACK_X, h + 0.025, RACK_Z + 0.3))
+		FunLooks.collider(plane, Vector3(1.0, 0.035, 0.3), Transform3D(Basis.IDENTITY, Vector3(RACK_X, h - 0.0175, RACK_Z + 0.15)))
+		FunLooks.collider(plane, Vector3(1.0, 0.06, 0.02), Transform3D(Basis.IDENTITY, Vector3(RACK_X, h + 0.03, RACK_Z + 0.3)))
 		for sx in [-0.48, 0.48]:
-			FunLooks.part(root, FunLooks.prism(Vector3(0.02, 0.12, 0.28)), wood, Vector3(1.4 + sx, h - 0.075, RACK_Z + 0.14),
+			FunLooks.part(root, FunLooks.prism(Vector3(0.02, 0.12, 0.28)), wood, Vector3(RACK_X + sx, h - 0.075, RACK_Z + 0.14),
 				Vector3(0, 0, PI))
-	FunLooks.label(root, "IN CASE OF BOREDOM\nBREAK GLASS", Vector3(1.4, 2.08, RACK_Z + 0.03), 26, Color(1, 0.35, 0.3))
+	FunLooks.label(root, "IN CASE OF BOREDOM\nBREAK GLASS", Vector3(RACK_X, 2.08, RACK_Z + 0.03), 26, Color(1, 0.35, 0.3))
 
 
 static func _plant(plane: Airliner, root: Node3D, at: Vector3, height: float) -> void:
@@ -202,25 +203,25 @@ static func _decor(root: Node3D) -> void:
 	for i in spots.size():
 		var sx: float = spots[i][0]
 		var z: float = spots[i][1]
-		var x := sx * 2.05
+		var x := sx * 2.74
 		var rot := Vector3(0, -sx * PI / 2, 0)
 		FunLooks.rounded_box(root, Vector3(0.04, 0.5, 0.42), 0.015, frame, Vector3(x, 1.75, z))
 		FunLooks.part(root, FunLooks.box(Vector3(0.01, 0.42, 0.34)), FunLooks.mat(arts[i][1], 0.9), Vector3(x - sx * 0.022, 1.75, z))
 		FunLooks.label(root, arts[i][0], Vector3(x - sx * 0.03, 1.75, z), 22, Color(1, 1, 1, 0.9), rot)
 	# Wall clock on the cargo bulkhead (it's always five o'clock somewhere).
-	var clock_at := Vector3(1.35, 2.22, 11.9)
+	var clock_at := Vector3(1.95, 2.3, 11.9)
 	FunLooks.part(root, FunLooks.cyl(0.16, 0.16, 0.04, 24), FunLooks.mat(FunLooks.CREAM, 0.5), clock_at, Vector3(PI / 2, 0, 0))
 	FunLooks.part(root, FunLooks.torus(0.155, 0.18), frame, clock_at, Vector3(PI / 2, 0, 0))
 	FunLooks.part(root, FunLooks.box(Vector3(0.012, 0.11, 0.005)), FunLooks.mat(FunLooks.INK), clock_at + Vector3(0, 0.05, -0.025))
 	FunLooks.part(root, FunLooks.box(Vector3(0.08, 0.012, 0.005)), FunLooks.mat(FunLooks.INK), clock_at + Vector3(0.04, 0, -0.025))
 	FunLooks.label(root, "5 O'CLOCK\nSOMEWHERE", clock_at + Vector3(0, -0.25, -0.03), 18, Color(1, 0.85, 0.5), Vector3(0, PI, 0))
-	FunLooks.label(root, "FASTEN SEATBELT\n(optional)", Vector3(0, 2.62, 11.7), 20, Color(1, 0.85, 0.3), Vector3(0, PI, 0))
+	FunLooks.label(root, "FASTEN SEATBELT\n(optional)", Vector3(0, 2.8, 11.7), 20, Color(1, 0.85, 0.3), Vector3(0, PI, 0))
 
 
 ## Warm ceiling pendant lamps over the walkway.
 static func _lights(root: Node3D) -> void:
 	for z in [7.3, 9.3, 11.0]:
-		var at := Vector3(0, 2.62, z)
+		var at := Vector3(0, 2.82, z)
 		FunLooks.part(root, FunLooks.cyl(0.004, 0.004, 0.18, 4), FunLooks.mat(FunLooks.INK), at + Vector3(0, 0.09, 0))
 		FunLooks.part(root, FunLooks.cyl(0.04, 0.14, 0.1, 18), FunLooks.metal(FunLooks.BRASS), at - Vector3(0, 0.02, 0))
 		FunLooks.part(root, FunLooks.sphere(0.045, 10), FunLooks.mat(Color(1, 0.9, 0.6), 0.3, 0.0, 3.0), at - Vector3(0, 0.07, 0))
@@ -248,7 +249,7 @@ static func _galley_shelves(plane: Airliner, root: Node3D) -> void:
 	var wood := FunLooks.mat(FunLooks.WOOD, 0.5)
 	var red := FunLooks.mat(Color(0.85, 0.12, 0.12), 0.4)
 	for sx in [-1.0, 1.0]:
-		var at := Vector3(sx * 1.45, 1.55, -9.78)
+		var at := Vector3(sx * 2.05, 1.55, -9.78)
 		FunLooks.rounded_box(root, Vector3(0.95, 0.035, 0.36), 0.015, wood, at)
 		FunLooks.part(root, FunLooks.box(Vector3(0.95, 0.06, 0.015)), red, at + Vector3(0, 0.03, 0.18))
 		for bx in [-0.4, 0.4]:

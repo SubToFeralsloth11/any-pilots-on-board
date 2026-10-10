@@ -28,34 +28,34 @@ const STATIONS := {
 }
 ## Station placements: type -> [plane-local position, yaw].
 const PLACES := {
-	"connect_four": [Vector3(-1.38, 0.72, 7.3), PI / 2],
-	"checkers": [Vector3(-1.38, 0.72, 9.3), PI / 2],
-	"tv": [Vector3(-1.3, 1.85, 6.1), 0.0],
-	"dartboard": [Vector3(-1.2, 1.6, 12.08), 0.0],
-	"hoop": [Vector3(1.2, 0.0, 12.08), 0.0],
-	"vending": [Vector3(1.6, 0.0, 9.3), -PI / 2],
-	"slots": [Vector3(1.65, 0.0, 10.3), -PI / 2],
-	"jukebox": [Vector3(1.6, 0.0, 11.3), -PI / 2],
-	"lavatory": [Vector3(-1.4, 0.0, 11.1), 0.0],
-	"bell": [Vector3(1.1, 1.04, -9.5), 0.0],
+	"connect_four": [Vector3(-1.98, 0.72, 7.3), PI / 2],
+	"checkers": [Vector3(-1.98, 0.72, 9.3), PI / 2],
+	"tv": [Vector3(-1.9, 1.85, 6.1), 0.0],
+	"dartboard": [Vector3(-1.9, 1.6, 12.08), 0.0],
+	"hoop": [Vector3(1.9, 0.0, 12.08), 0.0],
+	"vending": [Vector3(2.2, 0.0, 9.3), -PI / 2],
+	"slots": [Vector3(2.25, 0.0, 10.3), -PI / 2],
+	"jukebox": [Vector3(2.2, 0.0, 11.3), -PI / 2],
+	"lavatory": [Vector3(-2.0, 0.0, 11.1), 0.0],
+	"bell": [Vector3(1.7, 1.04, -9.5), 0.0],
 }
 ## Loose things: [kind, plane-local position, yaw, extra]. Yaw PI/2 lays a weapon along X.
 const LOOSE := [
 	# Weapons rack (cabin bulkhead, lounge side).
-	["dart_blaster", Vector3(1.15, 0.7, 6.25), PI / 2, {}],
-	["water_pistol", Vector3(1.65, 0.7, 6.25), PI / 2, {}],
-	["flare_gun", Vector3(1.15, 1.2, 6.25), PI / 2, {}],
-	["power_drill", Vector3(1.65, 1.2, 6.25), PI / 2, {}],
-	["blunderbuss", Vector3(1.4, 1.72, 6.25), PI / 2, {}],
+	["dart_blaster", Vector3(1.75, 0.7, 6.25), PI / 2, {}],
+	["water_pistol", Vector3(2.25, 0.7, 6.25), PI / 2, {}],
+	["flare_gun", Vector3(1.75, 1.2, 6.25), PI / 2, {}],
+	["power_drill", Vector3(2.25, 1.2, 6.25), PI / 2, {}],
+	["blunderbuss", Vector3(2.0, 1.72, 6.25), PI / 2, {}],
 	# Bar counter and booths.
-	["baguette", Vector3(1.4, 1.12, 7.65), 0.0, {}],
-	["confetti_cannon", Vector3(1.68, 1.15, 7.75), 0.0, {}],
-	["pillow_fight", Vector3(-1.38, 0.62, 8.58), 0.0, {}],
-	["leaf_blower", Vector3(-1.45, 0.72, 8.02), PI / 2, {}],
-	["crowbar", Vector3(-1.2, 0.62, 10.02), PI / 2, {}],
+	["baguette", Vector3(2.0, 1.12, 7.65), 0.0, {}],
+	["confetti_cannon", Vector3(2.28, 1.15, 7.75), 0.0, {}],
+	["pillow_fight", Vector3(-1.98, 0.62, 8.58), 0.0, {}],
+	["leaf_blower", Vector3(-2.05, 0.72, 8.02), PI / 2, {}],
+	["crowbar", Vector3(-1.8, 0.62, 10.02), PI / 2, {}],
 	# Galley emergency shelves above the counters.
-	["frying_pan", Vector3(1.45, 1.64, -9.78), PI / 2, {}],
-	["fire_axe", Vector3(-1.45, 1.64, -9.77), PI / 2, {}],
+	["frying_pan", Vector3(2.05, 1.64, -9.78), PI / 2, {}],
+	["fire_axe", Vector3(-2.05, 1.64, -9.77), PI / 2, {}],
 	# Cargo hold.
 	["sledgehammer", Vector3(0.9, 0.12, 13.4), 0.3, {}],
 	["golf_club", Vector3(-0.9, 0.08, 13.4), -0.2, {}],
@@ -65,16 +65,16 @@ const LOOSE := [
 	["basketball", Vector3(1.0, 0.15, 13.0), 0.0, {}],
 	["basketball", Vector3(1.35, 0.15, 13.2), 0.0, {}],
 	# Dice: two on booth A's table, one jumbo on the lounge floor.
-	["dice", Vector3(-1.05, 0.8, 7.0), 0.3, {}],
-	["dice", Vector3(-1.05, 0.8, 7.62), 1.1, {}],
+	["dice", Vector3(-1.65, 0.8, 7.0), 0.3, {}],
+	["dice", Vector3(-1.65, 0.8, 7.62), 1.1, {}],
 	["dice", Vector3(0.0, 0.2, 10.9), 0.4, {"big": true}],
 	# Darts on the bar for the dartboard.
-	["dart", Vector3(1.42, 1.08, 6.86), PI / 2, {"color": 0}],
-	["dart", Vector3(1.42, 1.08, 6.94), PI / 2, {"color": 0}],
-	["dart", Vector3(1.42, 1.08, 7.02), PI / 2, {"color": 1}],
-	["dart", Vector3(1.42, 1.08, 7.10), PI / 2, {"color": 1}],
-	["dart", Vector3(1.42, 1.08, 7.18), PI / 2, {"color": 2}],
-	["dart", Vector3(1.42, 1.08, 7.26), PI / 2, {"color": 2}],
+	["dart", Vector3(2.02, 1.08, 6.86), PI / 2, {"color": 0}],
+	["dart", Vector3(2.02, 1.08, 6.94), PI / 2, {"color": 0}],
+	["dart", Vector3(2.02, 1.08, 7.02), PI / 2, {"color": 1}],
+	["dart", Vector3(2.02, 1.08, 7.10), PI / 2, {"color": 1}],
+	["dart", Vector3(2.02, 1.08, 7.18), PI / 2, {"color": 2}],
+	["dart", Vector3(2.02, 1.08, 7.26), PI / 2, {"color": 2}],
 ]
 
 var world: World

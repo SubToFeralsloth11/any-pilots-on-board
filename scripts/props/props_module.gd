@@ -132,11 +132,11 @@ func _populate_cabin() -> void:
 	var gap_back: float = rows[5]
 	var zf := gap_front - 1.15
 	var zb := gap_back - 0.85
-	_spawn("suitcase", Vector3(1.2, 0.13, zf), 0.1)
-	_spawn("suitcase", Vector3(1.2, 0.38, zf), -0.2)
-	_spawn("bag", Vector3(1.2, 0.66, zf), 0.3)
-	_spawn("suitcase", Vector3(-1.15, 0.13, zf), PI / 2)
-	_spawn("bag", Vector3(-1.2, 0.16, zb), 0.2)
+	_spawn("suitcase", Vector3(1.8, 0.13, zf), 0.1)
+	_spawn("suitcase", Vector3(1.8, 0.38, zf), -0.2)
+	_spawn("bag", Vector3(1.8, 0.66, zf), 0.3)
+	_spawn("suitcase", Vector3(-1.75, 0.13, zf), PI / 2)
+	_spawn("bag", Vector3(-1.8, 0.16, zb), 0.2)
 	# Seats: pillows, laptops, a can and the rubber chicken, avoiding player spawn seats.
 	var seat_ids: Array[int] = []
 	for i in world.plane.seats.size():
@@ -154,14 +154,14 @@ func _populate_cabin() -> void:
 	_spawn("cart", Vector3(0, 0.48, gz + 0.3), 0.0)
 	var top := 1.0
 	for i in 4:
-		_spawn("can", Vector3(1.1 + (i % 2) * 0.11, top + 0.075, gz - 0.15 + (i >> 1) * 0.13), 0.0)
-	_spawn("banana", Vector3(1.2, top + 0.05, gz + 0.16), 0.0)
-	_spawn("snack", Vector3(1.45, top + 0.13, gz - 0.1), 0.0)
-	_spawn("snack", Vector3(1.62, top + 0.13, gz - 0.1), 0.15)
-	_spawn("duct_tape", Vector3(1.72, top + 0.035, gz + 0.12), 0.0)
-	_spawn("laptop", Vector3(-1.68, top + 0.055, gz), 0.0)
-	_spawn("megaphone", Vector3(-1.22, top + 0.14, gz), 0.0)
-	_spawn("extinguisher", Vector3(-1.6, 0.26, gz + 0.55), 0.0)
+		_spawn("can", Vector3(1.7 + (i % 2) * 0.11, top + 0.075, gz - 0.15 + (i >> 1) * 0.13), 0.0)
+	_spawn("banana", Vector3(1.8, top + 0.05, gz + 0.16), 0.0)
+	_spawn("snack", Vector3(2.05, top + 0.13, gz - 0.1), 0.0)
+	_spawn("snack", Vector3(2.22, top + 0.13, gz - 0.1), 0.15)
+	_spawn("duct_tape", Vector3(2.32, top + 0.035, gz + 0.12), 0.0)
+	_spawn("laptop", Vector3(-2.28, top + 0.055, gz), 0.0)
+	_spawn("megaphone", Vector3(-1.82, top + 0.14, gz), 0.0)
+	_spawn("extinguisher", Vector3(-2.2, 0.26, gz + 0.55), 0.0)
 	# Loose odds and ends near the exits.
 	_spawn("wrench", Vector3(0.9, 0.03, zb + 0.3), 0.8)
 	_spawn("can", Vector3(-0.3, 0.07, zf + 0.4), 0.0)

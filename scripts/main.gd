@@ -3,6 +3,7 @@ extends Node
 ##
 ## Command line (after `--`): --host | --join=IP  [--name=NAME]  [--quit-after=SECONDS]
 ## Dev checks: --shot=PATH.png [--shot-at=SECONDS] [--at=x,y,z plane-local] [--look=yawdeg,pitchdeg]
+##             --bench=SECONDS (vsync off; prints average FPS and render/physics counters, then quits)
 
 const WorldScript := preload("res://scripts/world.gd")
 
@@ -49,6 +50,8 @@ func _ready() -> void:
 		get_tree().create_timer(float(args["quit-after"])).timeout.connect(get_tree().quit)
 	if args.has("shot"):
 		_dev_shot(args)
+	if args.has("bench"):
+		_dev_bench(float(args.bench))
 	if args.has("host"):
 		_on_host()
 	elif args.has("join"):
@@ -81,6 +84,31 @@ func _dev_shot(args: Dictionary) -> void:
 	await RenderingServer.frame_post_draw
 	get_viewport().get_texture().get_image().save_png(args.shot)
 	print("SHOT ", args.shot)
+
+
+## Measures frame rate in the running round (after a 3 s warm-up) and prints one BENCH line.
+func _dev_bench(seconds: float) -> void:
+	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
+	await get_tree().create_timer(3.0).timeout
+	var frames := Engine.get_frames_drawn()
+	var t0 := Time.get_ticks_usec()
+	var worst := 0.0
+	var phys := 0.0
+	var samples := 0
+	while Time.get_ticks_usec() - t0 < seconds * 1e6:
+		await get_tree().process_frame
+		worst = maxf(worst, Performance.get_monitor(Performance.TIME_PROCESS))
+		phys += Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS)
+		samples += 1
+	var fps := (Engine.get_frames_drawn() - frames) / ((Time.get_ticks_usec() - t0) / 1e6)
+	print("BENCH fps=%.1f worst_process_ms=%.2f avg_physics_ms=%.2f draw_calls=%d primitives=%d objects=%d nodes=%d bodies=%d" % [
+		fps, worst * 1000.0, phys / maxf(samples, 1) * 1000.0,
+		Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME),
+		Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME),
+		Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME),
+		Performance.get_monitor(Performance.OBJECT_NODE_COUNT),
+		Performance.get_monitor(Performance.PHYSICS_3D_ACTIVE_OBJECTS)])
+	get_tree().quit()
 
 
 func _build_menu() -> void:

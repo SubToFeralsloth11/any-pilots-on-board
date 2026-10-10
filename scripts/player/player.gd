@@ -91,7 +91,9 @@ var _aim := {}               ## {type, ...} what the ray hits
 
 func _ready() -> void:
 	collision_layer = Layers.PLAYER
-	collision_mask = Layers.WORLD | Layers.PLAYER | Layers.PROP | Layers.NPC
+	# Loose props are not in the mask: walking never snags on luggage or clutter. Props still
+	# collide with the player's layer, so the moving capsule shoves them out of the way.
+	collision_mask = Layers.WORLD | Layers.PLAYER | Layers.NPC
 	floor_max_angle = deg_to_rad(55)
 	floor_snap_length = 0.3
 	_shape = CollisionShape3D.new()

@@ -559,7 +559,7 @@ func _act_door(peer: int, args: Array) -> void:
 
 
 func _act_ramp(peer: int, _args: Array) -> void:
-	if _player_near(peer, plane.to_global(Vector3(1.75, 1.2, 14.5)), 3.0):
+	if _player_near(peer, plane.to_global(Airliner.RAMP_LEVER), 3.0):
 		set_plane("ramp", not plane.ramp_open)
 
 

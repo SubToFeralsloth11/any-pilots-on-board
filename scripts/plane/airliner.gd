@@ -10,29 +10,31 @@ extends AnimatableBody3D
 ## changes only through apply_change(key, value); the host broadcasts via World.set_plane().
 
 const LAYER_WORLD := 1
-const HALF_W := 2.0          ## Inner half width of the walkable floor.
-const CEIL := 2.8
+const HALF_W := 2.6          ## Inner half width of the walkable floor.
+const CEIL := 3.0
 const NOSE_Z := -14.0
 const TAIL_Z := 22.0
-const GEAR_HEIGHT := 1.5     ## Floor height above the ground when the wheels touch.
-const HULL_CY := 1.15        ## Fuselage tube axis height.
-const HULL_R := 2.35         ## Outer radius.
-const HULL_R_IN := 2.22      ## Inner radius.
+const GEAR_HEIGHT := 2.2     ## Floor height above the ground when the wheels touch.
+const HULL_CY := 1.3         ## Fuselage tube axis height.
+const HULL_R := 3.05         ## Outer radius.
+const HULL_R_IN := 2.9       ## Inner radius.
 const ROW_Z := [-8.5, -7.0, -5.5, -4.0, -2.5, 2.0, 3.5, 5.0]
 const LOUNGE_WINDOW_Z := [7.5, 9.0, 10.5]
-const SEAT_X := [-1.45, -0.85, 0.85, 1.45]
+## Two seats per side; the aisle between them is ~2.3 m, wide enough to walk side by side.
+const SEAT_X := [-2.05, -1.45, 1.45, 2.05]
 const EXIT_GAP := Vector2(-0.6, 0.6)
-const WINDOW_X := 2.2
-const ENGINE_POS := [Vector3(-6, -1.0, -0.8), Vector3(6, -1.0, -0.8)]
-const PILOT_SEAT := Vector3(-0.6, 0.5, -12.6)
-const COPILOT_SEAT := Vector3(0.6, 0.5, -12.6)
+const WINDOW_X := 2.84
+const ENGINE_POS := [Vector3(-7, -1.15, -0.8), Vector3(7, -1.15, -0.8)]
+const PILOT_SEAT := Vector3(-0.75, 0.5, -12.6)
+const COPILOT_SEAT := Vector3(0.75, 0.5, -12.6)
 ## Lounge floor area (free for furniture): x/z bounds.
-const LOUNGE_MIN := Vector3(-1.9, 0.0, 6.2)
-const LOUNGE_MAX := Vector3(1.9, 0.0, 11.8)
+const LOUNGE_MIN := Vector3(-2.5, 0.0, 6.2)
+const LOUNGE_MAX := Vector3(2.5, 0.0, 11.8)
 ## Cargo hold floor area for crates: x/z bounds.
-const CARGO_MIN := Vector3(-1.7, 0.0, 13.0)
-const CARGO_MAX := Vector3(1.7, 0.0, 21.2)
-const RAMP_LEVER := Vector3(1.75, 1.2, 20.5)
+const CARGO_MIN := Vector3(-2.3, 0.0, 13.0)
+const CARGO_MAX := Vector3(2.3, 0.0, 21.2)
+const RAMP_LEVER := Vector3(2.35, 1.2, 20.5)
+const DOOR_GAP_HALF := 1.2   ## Half width of the lounge and cargo doorways.
 const SUCTION_BURST := 26.0
 const SUCTION_STEADY := 5.0
 const SUCTION_RANGE := 3.5
@@ -439,39 +441,48 @@ func _build_fuselage() -> void:
 	var inner := _csg_cyl(HULL_R_IN, length + 0.4, Vector3(0, HULL_CY, mid + 0.25), _mat(CABIN_WALL))
 	inner.operation = CSGShape3D.OPERATION_SUBTRACTION
 	_hull_csg.add_child(inner)
+	var hole_x := (HULL_R + HULL_R_IN) / 2.0
 	for sx in [-1, 1]:
 		for z: float in _window_zs():
-			_csg_hole(Vector3(0.8, 0.62, _window_width(z)), Vector3(sx * 2.25, 1.45, z))
-		_csg_hole(Vector3(0.8, 2.1, 1.2), Vector3(sx * 2.25, 1.05, 0))
-	_csg_hole(Vector3(3.2, 1.0, 0.6), Vector3(0, 1.7, NOSE_Z))   # Windshield.
+			_csg_hole(Vector3(0.8, 0.62, _window_width(z)), Vector3(sx * hole_x, 1.45, z))
+		_csg_hole(Vector3(0.8, 2.1, 1.2), Vector3(sx * hole_x, 1.05, 0))
+	_csg_hole(Vector3(3.9, 1.0, 0.6), Vector3(0, 1.7, NOSE_Z))   # Windshield.
 	# Nose dome below the windshield.
 	var nose := CSGSphere3D.new()
 	nose.radius = 1.0
 	nose.radial_segments = 24
 	nose.rings = 12
 	nose.material = _mat(HULL, 0.1, 0.4)
-	nose.scale = Vector3(HULL_R, 1.35, 3.0)
-	nose.position = Vector3(0, 0.0, NOSE_Z)
+	nose.scale = Vector3(HULL_R, 1.65, 3.6)
+	nose.position = Vector3(0, -0.1, NOSE_Z)
 	var nose_cut := CSGBox3D.new()
 	nose_cut.size = Vector3(2, 2, 2)   # In the sphere's scaled space: removes the rear half.
 	nose_cut.position = Vector3(0, 0, 1.0)
 	nose_cut.operation = CSGShape3D.OPERATION_SUBTRACTION
 	nose.add_child(nose_cut)
 	add_child(nose)
-	_sphere(0.35, Vector3(0, -0.2, NOSE_Z - 2.95), DARK, Vector3(1, 0.7, 0.3))   # Radar tip.
+	_sphere(0.4, Vector3(0, -0.3, NOSE_Z - 3.55), DARK, Vector3(1, 0.7, 0.3))   # Radar tip.
 	# Floors and ceiling (visible) plus the hidden collision shell.
-	_box(Vector3(3.9, 0.2, length), Vector3(0, -0.1, mid), CARPET, false)
-	_box(Vector3(0.7, 0.012, 16.0), Vector3(0, 0.006, -2.0), RUNNER, false)
-	_box(Vector3(2.85, 0.06, length), Vector3(0, CEIL + 0.03, mid), Color(0.97, 0.96, 0.93), false)
-	_collider(Vector3(4.4, 0.2, length), Vector3(0, -0.1, mid))
-	_collider(Vector3(4.4, 1.2, length), Vector3(0, -0.8, mid))
-	_collider(Vector3(4.4, 0.2, length), Vector3(0, CEIL + 0.1, mid))
+	var shell_w := 2.0 * (HALF_W + 0.2)
+	_box(Vector3(2.0 * HALF_W - 0.1, 0.2, length), Vector3(0, -0.1, mid), CARPET, false)
+	_box(Vector3(1.4, 0.012, 16.0), Vector3(0, 0.006, -2.0), RUNNER, false)
+	_box(Vector3(2.0 * hull_half_width(CEIL) - 0.1, 0.06, length), Vector3(0, CEIL + 0.03, mid), Color(0.97, 0.96, 0.93), false)
+	_collider(Vector3(shell_w, 0.2, length), Vector3(0, -0.1, mid))
+	_collider(Vector3(shell_w, 1.2, length), Vector3(0, -0.8, mid))
+	_collider(Vector3(shell_w, 0.2, length), Vector3(0, CEIL + 0.1, mid))
 	# Livery: belly stripe, cheat line, airline name.
 	for sx in [-1, 1]:
-		_box(Vector3(0.02, 0.22, length - 1.0), Vector3(sx * 2.335, 0.75, mid), TRIM, false)
-		_box(Vector3(0.02, 0.07, length - 1.0), Vector3(sx * 2.33, 0.55, mid), ACCENT, false)
-		_label("SKY-ISH AIRLINES", Vector3(sx * 2.21, 2.05, -4.5), 110, TRIM, sx * PI / 2).outline_size = 0
-		_label("probably fine™", Vector3(sx * 2.21, 2.05, 4.0), 60, Color(0.4, 0.4, 0.45), sx * PI / 2).outline_size = 0
+		_box(Vector3(0.02, 0.22, length - 1.0), Vector3(sx * hull_half_width(1.0, true), 1.0, mid), TRIM, false)
+		_box(Vector3(0.02, 0.07, length - 1.0), Vector3(sx * hull_half_width(0.8, true), 0.8, mid), ACCENT, false)
+		var name_x := hull_half_width(2.4, true) + 0.03
+		_label("SKY-ISH AIRLINES", Vector3(sx * name_x, 2.4, -4.5), 130, TRIM, sx * PI / 2).outline_size = 0
+		_label("probably fine™", Vector3(sx * name_x, 2.4, 4.0), 70, Color(0.4, 0.4, 0.45), sx * PI / 2).outline_size = 0
+
+
+## Half width of the hull tube at height y (inner surface, or outer with outer = true).
+static func hull_half_width(y: float, outer := false) -> float:
+	var r := HULL_R if outer else HULL_R_IN
+	return sqrt(maxf(r * r - (y - HULL_CY) * (y - HULL_CY), 0.0))
 
 
 func _csg_cyl(r: float, length: float, center: Vector3, mat: Material) -> CSGCylinder3D:
@@ -502,7 +513,7 @@ func _build_walls() -> void:
 		for s in spans(NOSE_Z, TAIL_Z, [EXIT_GAP]):
 			_collider(Vector3(0.2, 1.1, s.y - s.x), Vector3(x, 0.55, (s.x + s.y) / 2))
 			_collider(Vector3(0.2, 0.3, s.y - s.x), Vector3(x, 1.95, (s.x + s.y) / 2))
-		_collider(Vector3(0.2, 0.7, TAIL_Z - NOSE_Z), Vector3(x, 2.45, (TAIL_Z + NOSE_Z) / 2))
+		_collider(Vector3(0.2, CEIL - 2.1, TAIL_Z - NOSE_Z), Vector3(x, (CEIL + 2.1) / 2.0, (TAIL_Z + NOSE_Z) / 2))
 		var gaps := [EXIT_GAP]
 		for wz: float in window_zs:
 			gaps.append(Vector2(wz - _window_width(wz) / 2, wz + _window_width(wz) / 2))
@@ -511,27 +522,28 @@ func _build_walls() -> void:
 		for wz: float in window_zs:
 			_add_window(Vector3(0.05, 0.62, _window_width(wz)), Vector3(sx * WINDOW_X, 1.45, wz))
 			# Window shade and frame trim inside.
-			_box(Vector3(0.03, 0.08, _window_width(wz) + 0.12), Vector3(sx * 2.12, 1.8, wz), PLASTIC, false)
+			_box(Vector3(0.03, 0.08, _window_width(wz) + 0.12), Vector3(sx * (hull_half_width(1.8) - 0.03), 1.8, wz), PLASTIC, false)
 		# Over-wing emergency exit door.
 		var door_name := "left" if sx < 0 else "right"
-		var dm := _box(Vector3(0.12, 2.05, 1.18), Vector3(sx * 2.18, 1.03, 0), Color(0.88, 0.3, 0.25))
-		_box(Vector3(0.05, 0.08, 0.5), Vector3(sx * 2.1, 1.2, 0), Color(0.95, 0.85, 0.2), false).reparent(dm)
+		var dm := _box(Vector3(0.26, 2.05, 1.18), Vector3(sx * 2.76, 1.03, 0), Color(0.88, 0.3, 0.25))
+		_box(Vector3(0.05, 0.08, 0.5), Vector3(sx * 2.61, 1.2, 0), Color(0.95, 0.85, 0.2), false).reparent(dm)
 		var area := Interactable.make(Vector3(0.8, 2.0, 1.2), "", "door", [door_name])
-		area.position = Vector3(sx * 1.75, 1.0, 0)
+		area.position = Vector3(sx * 2.35, 1.0, 0)
 		add_child(area)
 		doors[door_name] = {"mesh": dm, "shape": dm.get_meta("shape"), "open": false, "area": area,
 			"label": "the emergency exit", "pos": Vector3(x, 1.0, 0)}
 		set_door(door_name, false)
-		_label("EXIT", Vector3(sx * 1.6, 2.6, 0), 56, Color(1, 0.25, 0.2), -sx * PI / 2)
+		_label("EXIT", Vector3(sx * 2.3, 2.6, 0), 56, Color(1, 0.25, 0.2), -sx * PI / 2)
 	# Front wall collision with windshield panes.
 	var fz := NOSE_Z - 0.1
-	_collider(Vector3(4.4, 1.2, 0.2), Vector3(0, 0.6, fz))
-	_collider(Vector3(4.4, 0.6, 0.2), Vector3(0, 2.5, fz))
-	for px in [-1.85, 1.85]:
-		_collider(Vector3(0.5, 1.0, 0.2), Vector3(px, 1.7, fz))
+	var front_w := 2.0 * (HALF_W + 0.2)
+	_collider(Vector3(front_w, 1.2, 0.2), Vector3(0, 0.6, fz))
+	_collider(Vector3(front_w, CEIL - 2.0, 0.2), Vector3(0, (CEIL + 2.4) / 2.0, fz))
+	for sx in [-1, 1]:
+		_collider(Vector3(0.86, 1.0, 0.2), Vector3(sx * 2.37, 1.7, fz))
 	_box(Vector3(0.12, 1.0, 0.16), Vector3(0, 1.7, fz), DARK)
-	for px in [-0.82, 0.82]:
-		_add_window(Vector3(1.52, 1.0, 0.05), Vector3(px, 1.7, fz))
+	for px in [-1.0, 1.0]:
+		_add_window(Vector3(1.88, 1.0, 0.05), Vector3(px, 1.7, fz))
 
 
 func _add_window(size: Vector3, pos: Vector3) -> void:
@@ -573,10 +585,10 @@ func _partition(z: float, hole: Vector3, hole_y: float, color: Color, trim: bool
 # --- Cockpit ------------------------------------------------------------------------------
 
 func _build_cockpit() -> void:
-	_bulkhead(-10.0, 0.55, 2.1, Color(0.82, 0.8, 0.74))
-	var dm := _box(Vector3(1.1, 2.1, 0.08), Vector3(0, 1.05, -10.0), Color(0.5, 0.46, 0.42))
-	_sphere(0.05, Vector3(0.4, 1.0, -9.94), METAL).reparent(dm)
-	var area := Interactable.make(Vector3(1.1, 2.0, 1.6), "", "door", ["cockpit"])
+	_bulkhead(-10.0, 0.6, 2.1, Color(0.82, 0.8, 0.74))
+	var dm := _box(Vector3(1.2, 2.1, 0.08), Vector3(0, 1.05, -10.0), Color(0.5, 0.46, 0.42))
+	_sphere(0.05, Vector3(0.45, 1.0, -9.94), METAL).reparent(dm)
+	var area := Interactable.make(Vector3(1.2, 2.0, 1.6), "", "door", ["cockpit"])
 	area.position = Vector3(0, 1.0, -10.0)
 	add_child(area)
 	doors["cockpit"] = {"mesh": dm, "shape": dm.get_meta("shape"), "open": false, "area": area,
@@ -585,15 +597,15 @@ func _build_cockpit() -> void:
 	_label("CREW ONLY", Vector3(0, 2.35, -9.92), 40, Color(1, 0.9, 0.3))
 	_label("(seriously)", Vector3(0, 2.18, -9.92), 22, Color(1, 0.9, 0.3))
 	# Dashboard: body, glare shield, screens, dials, throttle quadrant.
-	_box(Vector3(3.4, 1.0, 0.7), Vector3(0, 0.5, -13.55), Color(0.2, 0.2, 0.23))
-	_box(Vector3(3.4, 0.18, 0.45), Vector3(0, 1.09, -13.65), DARK)
-	for i in 4:
-		var sx := -1.2 + i * 0.8
+	_box(Vector3(4.6, 1.0, 0.7), Vector3(0, 0.5, -13.55), Color(0.2, 0.2, 0.23))
+	_box(Vector3(4.6, 0.18, 0.45), Vector3(0, 1.09, -13.65), DARK)
+	for i in 5:
+		var sx := -1.8 + i * 0.9
 		_box(Vector3(0.55, 0.38, 0.02), Vector3(sx, 0.78, -13.19), Color(0.05, 0.08, 0.1), false)
 		_box(Vector3(0.5, 0.16, 0.021), Vector3(sx, 0.86, -13.185), Color(0.25, 0.55, 0.95), false)
 		_box(Vector3(0.5, 0.16, 0.021), Vector3(sx, 0.7, -13.185), Color(0.55, 0.38, 0.2), false)
-	for i in 8:
-		_cyl(0.06, 0.03, Vector3(-1.4 + i * 0.4, 0.42, -13.19), Vector3.BACK, Color(0.9, 0.9, 0.85))
+	for i in 11:
+		_cyl(0.06, 0.03, Vector3(-2.0 + i * 0.4, 0.42, -13.19), Vector3.BACK, Color(0.9, 0.9, 0.85))
 	_box(Vector3(0.35, 0.25, 0.5), Vector3(0, 0.95, -12.95), Color(0.25, 0.25, 0.28))
 	for i in 2:
 		_box(Vector3(0.04, 0.22, 0.04), Vector3(-0.06 + i * 0.12, 1.15, -12.95), METAL, false)
@@ -601,7 +613,7 @@ func _build_cockpit() -> void:
 	_cyl(0.09, 0.05, Vector3(0, 1.21, -13.32), Vector3.UP, Color(0.85, 0.12, 0.12))
 	_label("DO NOT\nPRESS", Vector3(0, 1.24, -13.33), 18, Color.WHITE).rotation.x = -PI / 2
 	# Overhead switch panel.
-	_box(Vector3(1.6, 0.08, 1.0), Vector3(0, CEIL - 0.04, -12.8), Color(0.3, 0.3, 0.33), false)
+	_box(Vector3(2.0, 0.08, 1.0), Vector3(0, CEIL - 0.04, -12.8), Color(0.3, 0.3, 0.33), false)
 	for i in 12:
 		_box(Vector3(0.05, 0.04, 0.08), Vector3(-0.6 + (i % 6) * 0.24, CEIL - 0.1, -13.05 + (i / 6) * 0.4),
 			[ACCENT, Color(0.2, 0.9, 0.3), Color(0.9, 0.2, 0.2)][i % 3], false)
@@ -629,7 +641,7 @@ func _build_cockpit() -> void:
 	co.position = COPILOT_SEAT + Vector3(0, 0.3, 0)
 	add_child(co)
 	seat_areas.append(co)
-	var photo := _label("CAPT. DAVE\n★ 2 STARS ★", Vector3(-1.95, 1.9, -11.2), 22, Color(0.2, 0.2, 0.2), PI / 2)
+	var photo := _label("CAPT. DAVE\n★ 2 STARS ★", Vector3(-2.55, 1.9, -11.2), 22, Color(0.2, 0.2, 0.2), PI / 2)
 	photo.outline_size = 0
 
 
@@ -647,22 +659,22 @@ func _build_cabin() -> void:
 			area.position = seat + Vector3(0, 0.15, 0)
 			add_child(area)
 			seat_areas.append(area)
-		_label("%d" % (ROW_Z.find(z) + 1), Vector3(-1.38, 2.2, z), 30, Color(0.25, 0.25, 0.3), PI / 2)
+		_label("%d" % (ROW_Z.find(z) + 1), Vector3(-1.41, 2.62, z), 30, Color(0.25, 0.25, 0.3), PI / 2)
 	for i in 16:
 		aisle_points.append(Vector3(0, 0.0, -9.5 + i))
 	# Rounded overhead bins with latches and reading lights.
 	for sx in [-1, 1]:
-		_box(Vector3(0.5, 0.42, 15.4), Vector3(sx * 1.38, 2.48, -2.0), PLASTIC, false)
-		_cyl(0.21, 15.4, Vector3(sx * 1.13, 2.48, -2.0), Vector3.FORWARD, PLASTIC)
+		_box(Vector3(0.8, 0.45, 15.4), Vector3(sx * 2.05, 2.7, -2.0), PLASTIC, false)
+		_cyl(0.225, 15.4, Vector3(sx * 1.65, 2.7, -2.0), Vector3.FORWARD, PLASTIC)
 		for z: float in ROW_Z:
-			_box(Vector3(0.02, 0.06, 0.18), Vector3(sx * 0.92, 2.45, z), Color(0.55, 0.55, 0.55), false)
-			_cyl(0.03, 0.02, Vector3(sx * 1.2, 2.26, z + 0.2), Vector3.UP, Color(1, 0.95, 0.7))
-	_label("PLEASE REMAIN SEATED", Vector3(0, 2.4, -9.93), 30, Color(0.9, 0.9, 0.9))
-	_label("(lol)", Vector3(0, 2.25, -9.93), 20, Color(0.9, 0.9, 0.9))
+			_box(Vector3(0.02, 0.06, 0.18), Vector3(sx * 1.42, 2.68, z), Color(0.55, 0.55, 0.55), false)
+			_cyl(0.03, 0.02, Vector3(sx * 1.75, 2.47, z + 0.2), Vector3.UP, Color(1, 0.95, 0.7))
+	_label("PLEASE REMAIN SEATED", Vector3(0, 2.6, -9.93), 30, Color(0.9, 0.9, 0.9))
+	_label("(lol)", Vector3(0, 2.45, -9.93), 20, Color(0.9, 0.9, 0.9))
 	# Galley counter at the front of the cabin.
 	for sx in [-1, 1]:
-		_box(Vector3(0.9, 1.0, 0.5), Vector3(sx * 1.45, 0.5, -9.6), METAL)
-		_box(Vector3(0.95, 0.04, 0.55), Vector3(sx * 1.45, 1.02, -9.6), Color(0.3, 0.3, 0.32), false)
+		_box(Vector3(1.0, 1.0, 0.5), Vector3(sx * 2.05, 0.5, -9.6), METAL)
+		_box(Vector3(1.05, 0.04, 0.55), Vector3(sx * 2.05, 1.02, -9.6), Color(0.3, 0.3, 0.32), false)
 
 
 ## One passenger seat: cushion, backrest, headrest, armrests, tray table.
@@ -686,37 +698,38 @@ func _build_seat(base: Vector3) -> void:
 
 ## Empty, carpeted lounge between cabin and cargo; the Fun module furnishes it.
 func _build_lounge() -> void:
-	_bulkhead(LOUNGE_MIN.z - 0.2, 0.8, 2.3, Color(0.55, 0.38, 0.6))
-	_label("LOUNGE", Vector3(0, 2.5, LOUNGE_MIN.z - 0.27), 46, ACCENT, PI)
-	_label("LOUNGE", Vector3(0, 2.5, LOUNGE_MIN.z - 0.13), 46, ACCENT)
+	_bulkhead(LOUNGE_MIN.z - 0.2, DOOR_GAP_HALF, 2.4, Color(0.55, 0.38, 0.6))
+	_label("LOUNGE", Vector3(0, 2.65, LOUNGE_MIN.z - 0.27), 46, ACCENT, PI)
+	_label("LOUNGE", Vector3(0, 2.65, LOUNGE_MIN.z - 0.13), 46, ACCENT)
 	var mid := (LOUNGE_MIN.z + LOUNGE_MAX.z) / 2.0
 	var length := LOUNGE_MAX.z - LOUNGE_MIN.z + 0.4
-	_box(Vector3(3.8, 0.014, length), Vector3(0, 0.007, mid), Color(0.42, 0.2, 0.42), false)
+	_box(Vector3(2.0 * HALF_W - 0.2, 0.014, length), Vector3(0, 0.007, mid), Color(0.42, 0.2, 0.42), false)
 	for i in 6:
-		_box(Vector3(3.6, 0.016, 0.06), Vector3(0, 0.008, LOUNGE_MIN.z + 0.4 + i * 1.0), ACCENT, false)
+		_box(Vector3(2.0 * HALF_W - 0.4, 0.016, 0.06), Vector3(0, 0.008, LOUNGE_MIN.z + 0.4 + i * 1.0), ACCENT, false)
 	for sx in [-1, 1]:
-		_box(Vector3(0.04, 0.1, length), Vector3(sx * 1.95, 2.1, mid), Color(0.9, 0.5, 1.0), false)
+		_box(Vector3(0.04, 0.1, length), Vector3(sx * (hull_half_width(2.3) - 0.02), 2.3, mid), Color(0.9, 0.5, 1.0), false)
 
 
 # --- Cargo hold ---------------------------------------------------------------------------
 
 func _build_cargo() -> void:
 	var z0 := CARGO_MIN.z - 1.0
-	_bulkhead(z0, 0.8, 2.3, Color(0.45, 0.45, 0.42))
-	_label("CARGO", Vector3(0, 2.5, z0 - 0.07), 48, ACCENT, PI)
-	_label("CARGO", Vector3(0, 2.5, z0 + 0.07), 48, ACCENT)
+	_bulkhead(z0, DOOR_GAP_HALF, 2.4, Color(0.45, 0.45, 0.42))
+	_label("CARGO", Vector3(0, 2.65, z0 - 0.07), 48, ACCENT, PI)
+	_label("CARGO", Vector3(0, 2.65, z0 + 0.07), 48, ACCENT)
 	var mid := (z0 + TAIL_Z) / 2.0
-	_box(Vector3(3.9, 0.012, TAIL_Z - z0), Vector3(0, 0.006, mid), Color(0.32, 0.33, 0.35), false)
+	_box(Vector3(2.0 * HALF_W - 0.1, 0.012, TAIL_Z - z0), Vector3(0, 0.006, mid), Color(0.32, 0.33, 0.35), false)
 	for i in 4:
-		_box(Vector3(3.8, 0.014, 0.3), Vector3(0, 0.007, z0 + 1.5 + i * 2.4), ACCENT, false)
+		_box(Vector3(2.0 * HALF_W - 0.2, 0.014, 0.3), Vector3(0, 0.007, z0 + 1.5 + i * 2.4), ACCENT, false)
 	# Tie-down rails along the floor.
 	for sx in [-1, 1]:
-		_box(Vector3(0.06, 0.03, TAIL_Z - z0), Vector3(sx * 1.2, 0.015, mid), METAL, false)
+		_box(Vector3(0.06, 0.03, TAIL_Z - z0), Vector3(sx * 1.6, 0.015, mid), METAL, false)
 	# Rear ramp.
-	_ramp_mesh = _box(Vector3(4.2, 2.8, 0.15), Vector3.ZERO, Color(0.55, 0.57, 0.6))
+	var ramp_w := 2.0 * HALF_W + 0.2
+	_ramp_mesh = _box(Vector3(ramp_w, CEIL, 0.15), Vector3.ZERO, Color(0.55, 0.57, 0.6))
 	_ramp_shape = _ramp_mesh.get_meta("shape")
 	for i in 5:
-		_box(Vector3(4.0, 0.06, 0.04), Vector3(0, -1.1 + i * 0.55, -0.09), Color(0.4, 0.42, 0.45), false).reparent(_ramp_mesh, false)
+		_box(Vector3(ramp_w - 0.2, 0.06, 0.04), Vector3(0, -1.2 + i * 0.6, -0.09), Color(0.4, 0.42, 0.45), false).reparent(_ramp_mesh, false)
 	_ramp_lever = Interactable.make(Vector3(0.5, 0.8, 0.5), "", "ramp")
 	_ramp_lever.position = RAMP_LEVER
 	add_child(_ramp_lever)
@@ -725,8 +738,8 @@ func _build_cargo() -> void:
 	_sphere(0.06, RAMP_LEVER + Vector3(0, 0.44, 0), Color(0.85, 0.1, 0.1))
 	_label("RAMP", RAMP_LEVER + Vector3(0.18, 0.45, 0), 32, Color(1, 0.3, 0.3), -PI / 2)
 	# Rear cap around the ramp opening.
-	_partition(TAIL_Z + 0.05, Vector3(4.3, 2.85, 0.4), 1.42, HULL, false)
-	_collider(Vector3(4.4, 0.6, 0.12), Vector3(0, CEIL + 0.3, TAIL_Z + 0.05))
+	_partition(TAIL_Z + 0.05, Vector3(ramp_w + 0.1, CEIL + 0.05, 0.4), CEIL / 2.0, HULL, false)
+	_collider(Vector3(ramp_w + 0.2, 0.6, 0.12), Vector3(0, CEIL + 0.3, TAIL_Z + 0.05))
 	set_ramp(false)
 
 
@@ -734,31 +747,31 @@ func _ramp_transform(open: bool) -> Transform3D:
 	var hinge := Vector3(0, 0, TAIL_Z + 0.08)
 	var angle := deg_to_rad(110.0) if open else 0.0
 	var b := Basis(Vector3.RIGHT, angle)
-	return Transform3D(b, hinge + b * Vector3(0, 1.4, 0))
+	return Transform3D(b, hinge + b * Vector3(0, CEIL / 2.0, 0))
 
 
 # --- Wings, engines, tail, gear -----------------------------------------------------------
 
 func _build_wings() -> void:
 	for sx in [-1, 1]:
-		_box(Vector3(11.9, 0.3, 3.6), Vector3(sx * 8.05, -0.25, 0.7), HULL)
-		_cyl(0.15, 11.9, Vector3(sx * 8.05, -0.25, -1.1), Vector3.RIGHT, HULL)
+		_box(Vector3(13.0, 0.3, 3.6), Vector3(sx * 8.8, -0.5, 0.7), HULL)
+		_cyl(0.15, 13.0, Vector3(sx * 8.8, -0.5, -1.1), Vector3.RIGHT, HULL)
 		var pivot := Node3D.new()
-		pivot.position = Vector3(sx * 7.0, -0.3, 2.45)
+		pivot.position = Vector3(sx * 7.8, -0.55, 2.45)
 		add_child(pivot)
 		_box(Vector3(9.0, 0.08, 0.9), Vector3.ZERO, Color(0.85, 0.86, 0.88), false).reparent(pivot, false)
 		pivot.get_child(0).position = Vector3(0, 0, 0.45)
 		_flap_pivots.append(pivot)
-		_box(Vector3(11.9, 0.02, 0.2), Vector3(sx * 8.05, -0.09, -0.9), TRIM, false)
+		_box(Vector3(13.0, 0.02, 0.2), Vector3(sx * 8.8, -0.34, -0.9), TRIM, false)
 		# Winglet.
-		var wl := _box(Vector3(0.2, 1.4, 1.4), Vector3(sx * 14.2, 0.4, 1.4), TRIM, false)
+		var wl := _box(Vector3(0.2, 1.4, 1.4), Vector3(sx * 15.2, 0.15, 1.4), TRIM, false)
 		wl.rotation.z = -sx * 0.25
-		_sphere(0.14, Vector3(sx * 14.1, -0.15, 0.0), Color(1, 0.1, 0.1) if sx < 0 else Color(0.1, 1, 0.2))
-		_label("NO STEP", Vector3(sx * 4.5, -0.08, 1.8), 64, Color(0.2, 0.2, 0.2)).rotation.x = -PI / 2
-		_label("(please)", Vector3(sx * 4.5, -0.08, 2.25), 36, Color(0.2, 0.2, 0.2)).rotation.x = -PI / 2
+		_sphere(0.14, Vector3(sx * 15.1, -0.4, 0.0), Color(1, 0.1, 0.1) if sx < 0 else Color(0.1, 1, 0.2))
+		_label("NO STEP", Vector3(sx * 5.0, -0.33, 1.8), 64, Color(0.2, 0.2, 0.2)).rotation.x = -PI / 2
+		_label("(please)", Vector3(sx * 5.0, -0.33, 2.25), 36, Color(0.2, 0.2, 0.2)).rotation.x = -PI / 2
 		# Grab handles to cling to.
 		for hz in [0.2, 1.6]:
-			_cyl(0.035, 0.6, Vector3(sx * 3.0, 0.02, hz), Vector3.RIGHT, ACCENT)
+			_cyl(0.035, 0.6, Vector3(sx * 3.4, -0.31, hz), Vector3.RIGHT, ACCENT)
 		_build_engine(0 if sx < 0 else 1)
 
 
@@ -828,38 +841,38 @@ func _make_fire(pos: Vector3) -> Node3D:
 
 func _build_tail() -> void:
 	# Upswept tail cone above the ramp, fin and stabilisers.
-	_cyl(1.5, 3.6, Vector3(0, 2.75, TAIL_Z + 1.6), Vector3.BACK, HULL, 0.35)
-	_box(Vector3(0.3, 4.0, 3.2), Vector3(0, 5.2, TAIL_Z + 1.2), HULL)
-	_cyl(0.15, 4.0, Vector3(0, 5.2, TAIL_Z - 0.4), Vector3.UP, HULL)
-	_box(Vector3(0.32, 1.6, 2.4), Vector3(0, 5.8, TAIL_Z + 1.4), TRIM, false)
-	_label("S?", Vector3(0.17, 5.8, TAIL_Z + 1.4), 220, Color.WHITE, PI / 2).outline_size = 0
-	_label("S?", Vector3(-0.17, 5.8, TAIL_Z + 1.4), 220, Color.WHITE, -PI / 2).outline_size = 0
-	_box(Vector3(8.0, 0.18, 2.0), Vector3(0, 3.3, TAIL_Z + 2.0), HULL)
-	_cyl(0.09, 8.0, Vector3(0, 3.3, TAIL_Z + 1.0), Vector3.RIGHT, HULL)
+	_cyl(1.9, 4.2, Vector3(0, 2.9, TAIL_Z + 1.9), Vector3.BACK, HULL, 0.45)
+	_box(Vector3(0.35, 4.4, 3.4), Vector3(0, 6.4, TAIL_Z + 1.6), HULL)
+	_cyl(0.17, 4.4, Vector3(0, 6.4, TAIL_Z - 0.1), Vector3.UP, HULL)
+	_box(Vector3(0.37, 1.7, 2.6), Vector3(0, 7.1, TAIL_Z + 1.8), TRIM, false)
+	_label("S?", Vector3(0.2, 7.1, TAIL_Z + 1.8), 240, Color.WHITE, PI / 2).outline_size = 0
+	_label("S?", Vector3(-0.2, 7.1, TAIL_Z + 1.8), 240, Color.WHITE, -PI / 2).outline_size = 0
+	_box(Vector3(9.5, 0.2, 2.2), Vector3(0, 3.6, TAIL_Z + 2.4), HULL)
+	_cyl(0.1, 9.5, Vector3(0, 3.6, TAIL_Z + 1.3), Vector3.RIGHT, HULL)
 
 
 func _build_gear() -> void:
-	for p: Vector3 in [Vector3(0, -1.2, -11), Vector3(-1.6, -1.2, 1.5), Vector3(1.6, -1.2, 1.5)]:
+	for p: Vector3 in [Vector3(0, -1.9, -11), Vector3(-2.0, -1.9, 1.5), Vector3(2.0, -1.9, 1.5)]:
 		for dx in ([-0.2, 0.2] if p.x == 0.0 else [-0.25, 0.25]):
 			_gear_meshes.append(_cyl(0.3, 0.22, p + Vector3(dx, 0, 0), Vector3.RIGHT, Color(0.08, 0.08, 0.08)))
 			_gear_meshes.append(_cyl(0.14, 0.24, p + Vector3(dx, 0, 0), Vector3.RIGHT, METAL, -1.0, 0.6))
-		_gear_meshes.append(_cyl(0.06, 0.6, p + Vector3(0, 0.35, 0), Vector3.UP, METAL, -1.0, 0.6))
+		_gear_meshes.append(_cyl(0.06, 1.0, p + Vector3(0, 0.55, 0), Vector3.UP, METAL, -1.0, 0.6))
 
 
 func _build_lights() -> void:
 	for z in [-12.0, -7.5, -3.0, 2.5, 9.0, 15.0, 19.5]:
 		var l := OmniLight3D.new()
-		l.position = Vector3(0, 2.5, z)
+		l.position = Vector3(0, CEIL - 0.25, z)
 		l.light_color = Color(1.0, 0.95, 0.85) if z < 12.0 else Color(0.85, 0.9, 1.0)
-		l.light_energy = 1.2
-		l.omni_range = 6.0
+		l.light_energy = 1.3
+		l.omni_range = 7.5
 		add_child(l)
 
 
 ## One smoke trail per damage part; set_damage turns it on as health drops.
 func _build_smoke() -> void:
 	var spots := {"engine0": ENGINE_POS[0] + Vector3(0, 0.4, 1.0), "engine1": ENGINE_POS[1] + Vector3(0, 0.4, 1.0),
-		"wing0": Vector3(-9, 0, 1.5), "wing1": Vector3(9, 0, 1.5), "tail": Vector3(0, 4.5, TAIL_Z + 2.0),
+		"wing0": Vector3(-9.5, -0.3, 1.5), "wing1": Vector3(9.5, -0.3, 1.5), "tail": Vector3(0, 5.6, TAIL_Z + 2.0),
 		"hull": Vector3(0, HULL_CY + HULL_R, 2.0)}
 	var puff := SphereMesh.new()
 	puff.radius = 0.3
