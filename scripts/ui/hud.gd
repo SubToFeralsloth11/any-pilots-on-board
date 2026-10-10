@@ -4,6 +4,7 @@ extends CanvasLayer
 
 const PilotPanel := preload("res://scripts/ui/pilot_panel.gd")
 const Ambience := preload("res://scripts/ui/ambience.gd")
+const SettingsMenu := preload("res://scripts/ui/settings_menu.gd")
 
 const CHEAT_TIME := 10.0
 const TOAST_TIME := 3.5
@@ -47,6 +48,10 @@ var _results_title: Label
 var _flash: ColorRect
 var _ambience: Node
 var _time := 0.0
+var _pause_box: VBoxContainer
+var _settings: SettingsMenu
+var _awards_box: VBoxContainer
+var _fps_label: Label
 
 
 func _ready() -> void:
@@ -74,6 +79,7 @@ func _ready() -> void:
 	_root.add_child(_flash)
 	_build_pause()
 	_build_results()
+	_build_fps_counter()
 	_ambience = Ambience.new()
 	_ambience.set("world", world)
 	add_child(_ambience)
@@ -82,7 +88,7 @@ func _ready() -> void:
 	world.round_ended.connect(_on_round_ended)
 
 
-## True while the pause menu or results screen should swallow gameplay input.
+## True while the pause menu (incl. settings) or results screen should swallow gameplay input.
 func blocking_input() -> bool:
 	return _pause.visible or _results.visible
 
@@ -116,14 +122,14 @@ func _make_theme() -> Theme:
 	return t
 
 
-func _box(color: Color, radius: int) -> StyleBoxFlat:
+func _box(color: Color, radius: int, h_margin := 14, v_margin := 8) -> StyleBoxFlat:
 	var s := StyleBoxFlat.new()
 	s.bg_color = color
 	s.set_corner_radius_all(radius)
-	s.content_margin_left = 14
-	s.content_margin_right = 14
-	s.content_margin_top = 8
-	s.content_margin_bottom = 8
+	s.content_margin_left = h_margin
+	s.content_margin_right = h_margin
+	s.content_margin_top = v_margin
+	s.content_margin_bottom = v_margin
 	return s
 
 
@@ -266,40 +272,78 @@ func _title(text: String, size: int, color: Color) -> Label:
 
 func _build_pause() -> void:
 	_pause = _overlay()
-	var box := VBoxContainer.new()
-	box.add_theme_constant_override("separation", 14)
-	box.alignment = BoxContainer.ALIGNMENT_CENTER
-	_place(box, Vector2(0.5, 0.5), Rect2(-170, -150, 340, 300))
-	_pause.add_child(box)
-	box.add_child(_title("PAUSED", 48, Color.WHITE))
+	_pause_box = VBoxContainer.new()
+	_pause_box.add_theme_constant_override("separation", 14)
+	_pause_box.alignment = BoxContainer.ALIGNMENT_CENTER
+	_place(_pause_box, Vector2(0.5, 0.5), Rect2(-170, -170, 340, 340))
+	_pause.add_child(_pause_box)
+	_pause_box.add_child(_title("PAUSED", 48, Color.WHITE))
 	var sub := Label.new()
 	sub.text = "(the plane is not. Good luck.)"
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	box.add_child(sub)
-	_button(box, "Resume", _resume)
-	_button(box, "Leave flight", _leave)
+	_pause_box.add_child(sub)
+	_button(_pause_box, "Resume", _resume)
+	_button(_pause_box, "Settings", _open_settings)
+	_button(_pause_box, "Leave flight", _leave)
+	_settings = SettingsMenu.new()
+	_settings.closed.connect(func() -> void: _pause_box.visible = true)
+	_pause.add_child(_settings)
 
 
 func _build_results() -> void:
 	_results = _overlay()
 	var panel := PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", _round_panel(Color(0.06, 0.09, 0.22, 0.92), Color(1, 0.84, 0.2)))
 	panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	panel.grow_vertical = Control.GROW_DIRECTION_BOTH
-	_place(panel, Vector2(0.5, 0.5), Rect2(-280, -250, 560, 500))
+	_place(panel, Vector2(0.5, 0.5), Rect2(0, 0, 0, 0))
 	_results.add_child(panel)
+	var cols := HBoxContainer.new()
+	cols.add_theme_constant_override("separation", 28)
+	panel.add_child(cols)
 	var box := VBoxContainer.new()
 	box.add_theme_constant_override("separation", 10)
-	panel.add_child(box)
+	cols.add_child(box)
 	_results_title = _title("", 64, Color.WHITE)
 	box.add_child(_results_title)
-	_results_text = _rich(520)
+	_results_text = _rich(460)
 	_results_text.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(_results_text)
 	var leave := _button(box, "Leave flight", _leave)
 	leave.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	_awards_box = VBoxContainer.new()
+	_awards_box.add_theme_constant_override("separation", 8)
+	cols.add_child(_awards_box)
+
+
+func _build_fps_counter() -> void:
+	_fps_label = Label.new()
+	_fps_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_fps_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_fps_label.add_theme_font_size_override("font_size", 18)
+	_fps_label.add_theme_color_override("font_color", Color(0.6, 1, 0.6))
+	_place(_fps_label, Vector2(0.5, 0), Rect2(-60, 8, 120, 26))
+	_fps_label.visible = false
+	_root.add_child(_fps_label)
+
+
+## Chunky rounded panel with a coloured rim and a soft drop shadow.
+func _round_panel(color: Color, rim: Color, pad := 24.0) -> StyleBoxFlat:
+	var s := _box(color, int(pad))
+	s.border_color = rim
+	s.set_border_width_all(4)
+	s.shadow_color = Color(0, 0, 0, 0.35)
+	s.shadow_size = 10
+	s.shadow_offset = Vector2(0, 6)
+	s.content_margin_left = pad
+	s.content_margin_right = pad
+	s.content_margin_top = pad * 0.75
+	s.content_margin_bottom = pad * 0.75
+	return s
 
 
 # --- Per frame -------------------------------------------------------------------------------
+
 
 func _process(dt: float) -> void:
 	_time += dt
@@ -321,6 +365,9 @@ func _process(dt: float) -> void:
 	if _cheats.visible:
 		_cheats.modulate.a = clampf(CHEAT_TIME + 1.0 - _time, 0.0, 1.0)
 		_cheats.visible = _time < CHEAT_TIME + 1.0
+	_fps_label.visible = Settings.show_fps
+	if _fps_label.visible:
+		_fps_label.text = "%d FPS" % Engine.get_frames_per_second()
 
 
 func _update_objective() -> void:
@@ -435,7 +482,9 @@ func _on_toast(text: String) -> void:
 
 func _input(event: InputEvent) -> void:
 	if event.is_action_pressed("pause"):
-		if _pause.visible:
+		if _settings.visible:
+			_settings.close()
+		elif _pause.visible:
 			_resume()
 		elif not _results.visible:
 			_open_pause()
@@ -460,12 +509,19 @@ func _open_pause() -> void:
 
 
 func _resume() -> void:
+	_settings.visible = false
+	_pause_box.visible = true
 	_pause.visible = false
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 
 func _leave() -> void:
 	_main().call("leave_game")
+
+
+func _open_settings() -> void:
+	_pause_box.visible = false
+	_settings.open()
 
 
 func _on_round_ended(result: Dictionary) -> void:
@@ -511,3 +567,30 @@ func _fill_results(r: Dictionary) -> void:
 	else:
 		lines.append("[color=#7fd6ff]Waiting for the host to press [lb]R]...[/color]")
 	_results_text.text = "\n".join(lines)
+	_fill_awards(r.get("awards", []))
+
+
+## One chunky card per crew award (from Scoring.awards via the round result).
+func _fill_awards(awards: Array) -> void:
+	for child in _awards_box.get_children():
+		child.queue_free()
+	_awards_box.visible = not awards.is_empty()
+	if awards.is_empty():
+		return
+	_awards_box.add_child(_title("CREW AWARDS", 30, Color(1, 0.84, 0.2)))
+	var grid := GridContainer.new()
+	grid.columns = 2
+	grid.add_theme_constant_override("h_separation", 10)
+	grid.add_theme_constant_override("v_separation", 10)
+	_awards_box.add_child(grid)
+	for i in awards.size():
+		var a: Dictionary = awards[i]
+		var card := PanelContainer.new()
+		var tint := Color(SPEAKER_COLORS[i % SPEAKER_COLORS.size()])
+		card.add_theme_stylebox_override("panel", _round_panel(Color(0.12, 0.16, 0.34, 0.95), tint, 14.0))
+		var r := _rich(270)
+		r.text = "[font_size=21][color=#%s][b]%s[/b][/color][/font_size]\n[b]%s[/b]  [color=#c8d4ff]%s[/color]" % [
+			tint.to_html(false), str(a.title).replace("[", "[lb]"), str(a.name).replace("[", "[lb]"),
+			str(a.text).replace("[", "[lb]")]
+		card.add_child(r)
+		grid.add_child(card)

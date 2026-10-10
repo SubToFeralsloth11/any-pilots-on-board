@@ -6,6 +6,7 @@ extends Node
 ##             --bench=SECONDS (vsync off; prints average FPS and render/physics counters, then quits)
 
 const WorldScript := preload("res://scripts/world.gd")
+const SettingsMenu := preload("res://scripts/ui/settings_menu.gd")
 
 const ACTIONS := {
 	"move_forward": [KEY_W], "move_back": [KEY_S], "move_left": [KEY_A], "move_right": [KEY_D],
@@ -21,6 +22,8 @@ var menu: Control
 var _name_edit: LineEdit
 var _ip_edit: LineEdit
 var _status: Label
+var _menu_panel: Control
+var _settings: SettingsMenu
 
 
 static func setup_input() -> void:
@@ -192,6 +195,7 @@ func _build_menu() -> void:
 	panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	panel.grow_vertical = Control.GROW_DIRECTION_BOTH
 	menu.add_child(panel)
+	_menu_panel = panel
 	var box := VBoxContainer.new()
 	box.custom_minimum_size = Vector2(480, 0)
 	box.add_theme_constant_override("separation", 10)
@@ -219,6 +223,10 @@ func _build_menu() -> void:
 	join.text = "Join a friend's flight"
 	join.pressed.connect(_on_join)
 	box.add_child(join)
+	var settings_btn := Button.new()
+	settings_btn.text = "Settings"
+	settings_btn.pressed.connect(_open_settings)
+	box.add_child(settings_btn)
 	var quit := Button.new()
 	quit.text = "Quit"
 	quit.pressed.connect(get_tree().quit)
@@ -231,6 +239,7 @@ func _build_menu() -> void:
 	var ips := Net.lan_addresses()
 	if not ips.is_empty():
 		_status.text = "Friends on your Wi-Fi join you at: " + ", ".join(ips)
+	_build_settings()
 
 
 func _field(parent: Control, label: String, value: String) -> LineEdit:
@@ -243,6 +252,17 @@ func _field(parent: Control, label: String, value: String) -> LineEdit:
 	e.custom_minimum_size.y = 40
 	parent.add_child(e)
 	return e
+
+
+func _build_settings() -> void:
+	_settings = SettingsMenu.new()
+	_settings.closed.connect(func() -> void: _menu_panel.visible = true)
+	menu.add_child(_settings)
+
+
+func _open_settings() -> void:
+	_menu_panel.visible = false
+	_settings.open()
 
 
 func _on_host() -> void:
@@ -301,4 +321,6 @@ func _back_to_menu(message: String) -> void:
 		world = null
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	menu.visible = true
+	if _settings.visible:
+		_settings.close()
 	_status.text = message

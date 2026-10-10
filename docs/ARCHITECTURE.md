@@ -27,6 +27,7 @@ The host (peer 1) is authoritative. It simulates `FlightModel`, every networked 
 | `world.damage_plane(part, amount)` | Plane damage. Parts: `engine0/1`, `wing0/1` (left/right), `tail`, `hull`. Health is kept in `plane.damage[part]` on every peer (1 = intact). A negative amount repairs. |
 | `world.damage_plane_at(pos, amount)` | Damages the part at a world point, breaks a window right there, leaves a scorch mark, and returns the part name. |
 | `world.add_stat(key, n)` | Round statistics. |
+| `world.add_player_stat(peer, key, n)` | Per-player round statistics for the crew awards (keys in `Scoring.AWARDS`). |
 | `world.request(action, args)` (any peer) | Sends an action to the host, which runs `handler(peer_id, args)`. |
 
 `world.locked_doors` is a host-side `{door_name: true}` map. The cockpit door starts locked.
@@ -81,12 +82,12 @@ Group `"npc"` marks passengers: losing one counts as `passengers_lost`.
 | Right mouse button | Use the held item (World's `use_item` action calls the object's `use()`) |
 | Y | Shout (`shout` action) |
 | G | Landing gear |
-| Esc | Pause |
+| Esc | Pause (Resume, Settings, Leave). Settings also open from the title menu and are saved by the `Settings` autoload. |
 | R | Restart (host, after the round ends) |
 
 ## Round flow
 
-`FlightModel.phase` is `FLYING → ROLLING → LANDED`, or `FLYING → CRASHED`. When the round ends, the host emits `round_ended(result)` on every peer. The result is built by `Scoring.result`. `Main.restart_round()` (host only) rebuilds the World on every peer.
+`FlightModel.phase` is `FLYING → ROLLING → LANDED`, or `FLYING → CRASHED`. When the round ends, the host emits `round_ended(result)` on every peer. The result is built by `Scoring.result`; it carries the per-player stats and the crew awards from `Scoring.awards` (pure; ties go to the lowest peer id), which the results screen shows as cards. `Main.restart_round()` (host only) rebuilds the World on every peer.
 
 ## Dev and test commands
 

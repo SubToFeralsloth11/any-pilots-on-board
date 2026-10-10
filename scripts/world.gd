@@ -19,10 +19,21 @@ const FULL_SNAPSHOT_INTERVAL := 2.0
 const LOSE_DISTANCE := 90.0        ## Objects this far from the plane are gone forever.
 const WIND_ACCEL := 9.0            ## Rearward push outside the hull at cruise speed.
 const GRAB_REACH := 4.5
-const HOLD_GAIN := 14.0
+const HOLD_GAIN := 14.0             ## Hold-point spring for a light object (1/s).
+const HOLD_HEAVY := 20.0            ## kg at which the spring is half as stiff (heavy things lag).
+const HOLD_SMOOTH := 0.5            ## Blend toward the steered velocity each tick (no jitter).
+const HOLD_MAX_SPEED := 12.0
+const HOLD_SPIN_DAMP := 0.8         ## Angular velocity kept per tick while carried.
 const HOLD_SNAP := 3.5             ## Held object torn away beyond this distance.
-const THROW_SPEED := 15.0
-const HEAVY_MASS := 30.0
+const THROW_SPEED := 16.0           ## Throw speed of a THROW_REF_MASS object.
+const THROW_REF_MASS := 4.0
+const THROW_SCALE_MIN := 0.45       ## Speed scale is sqrt(ref/mass), clamped to MIN..MAX.
+const THROW_SCALE_MAX := 1.1
+const THROW_LOFT := 1.2
+const THROW_SPIN := 8.0             ## rad/s for light objects, less for heavy ones.
+const PUNCH_DV := 10.0              ## Velocity change is PUNCH_DV / sqrt(mass), clamped below.
+const PUNCH_DV_MIN := 2.0
+const PUNCH_DV_MAX := 7.0
 const WINDOW_PUNCHES := 3
 const PART_SLOTS := 16             ## Snapshot key = net_id * PART_SLOTS + part index (0 = root).
 
@@ -30,6 +41,7 @@ const PropsModule := preload("res://scripts/props/props_module.gd")
 const NpcModule := preload("res://scripts/npcs/npc_module.gd")
 const StoryModule := preload("res://scripts/story/story.gd")
 const FunModule := preload("res://scripts/fun/fun_module.gd")
+const PingsModule := preload("res://scripts/ui/pings.gd")
 const OutsideScene := preload("res://scripts/outside/outside.gd")
 const HudScript := preload("res://scripts/ui/hud.gd")
 
@@ -41,6 +53,7 @@ var props: Node
 var npcs: Node
 var story: Node
 var fun: Node
+var pings: Node
 var objects_root: Node3D
 var players_root: Node3D
 
@@ -57,6 +70,7 @@ var stats := {"windows_broken": 0, "items_lost": 0, "passengers_lost": 0, "thing
 	"players_fell": 0, "fires_put_out": 0}
 
 var _kinds := {}           ## kind -> Callable(extra: Dictionary) -> Node3D
+var player_stats := {}     ## Host: peer_id -> {stat: float} for end-of-round awards (Scoring.awards).
 var _actions := {}         ## action -> Callable(peer_id: int, args: Array)
 var _ready_peers := {}     ## Clients that finished loading this round (host).
 var _next_id := 1
@@ -87,6 +101,7 @@ func _ready() -> void:
 	npcs = _add_module(NpcModule, "Npcs")
 	story = _add_module(StoryModule, "Story")
 	fun = _add_module(FunModule, "Fun")
+	pings = _add_module(PingsModule, "Pings")
 	hud = HudScript.new()
 	hud.name = "Hud"
 	hud.set("world", self)
@@ -97,7 +112,7 @@ func _ready() -> void:
 	if is_server():
 		multiplayer.peer_disconnected.connect(_on_peer_left)
 		_add_player(1, Net.local_name)
-		for m in [props, npcs, story, fun]:
+		for m in [props, npcs, story, fun, pings]:
 			m.populate()
 	else:
 		_rpc_client_ready.rpc_id(1, Net.local_name)
@@ -291,6 +306,14 @@ func _rpc_toast(text: String) -> void:
 
 func add_stat(key: String, amount := 1) -> void:
 	stats[key] = int(stats.get(key, 0)) + amount
+
+
+## Host only. Per-player round statistic (keys: Scoring.AWARDS), sent with the round result.
+func add_player_stat(peer: int, key: String, amount := 1.0) -> void:
+	if not is_server():
+		return
+	var s: Dictionary = player_stats.get_or_add(peer, {})
+	s[key] = float(s.get(key, 0.0)) + amount
 
 
 ## Host only. Adds velocity to a player (knockbacks, extinguisher thrust, turbulence).
@@ -507,11 +530,13 @@ func _act_throw(peer: int, args: Array) -> void:
 	var obj := _release(peer)
 	if obj == null:
 		return
-	var speed := THROW_SPEED if obj.mass < HEAVY_MASS else THROW_SPEED * 0.5
-	obj.linear_velocity = dir * speed + Vector3(0, 1.5, 0)
-	obj.angular_velocity = Vector3(randf_range(-6, 6), randf_range(-6, 6), randf_range(-6, 6))
+	var heft := clampf(sqrt(THROW_REF_MASS / obj.mass), THROW_SCALE_MIN, THROW_SCALE_MAX)
+	obj.linear_velocity = dir * THROW_SPEED * heft + plane.global_basis.y * THROW_LOFT
+	var spin := THROW_SPIN * clampf(1.0 / sqrt(obj.mass), 0.15, 1.0)
+	obj.angular_velocity = Vector3(randf_range(-1, 1), randf_range(-1, 1), randf_range(-1, 1)) * spin
 	if obj.has_method("on_thrown"):
 		obj.on_thrown(peer)
+	add_player_stat(peer, "things_thrown")
 
 
 func _act_punch(peer: int, args: Array) -> void:
@@ -519,9 +544,11 @@ func _act_punch(peer: int, args: Array) -> void:
 	if obj == null or not _player_near(peer, obj.global_position, 3.0):
 		return
 	var dir: Vector3 = (args[1] as Vector3).normalized()
-	obj.apply_central_impulse((dir + Vector3(0, 0.3, 0)) * clampf(obj.mass * 4.0, 2.0, 120.0))
+	var dv := clampf(PUNCH_DV / sqrt(obj.mass), PUNCH_DV_MIN, PUNCH_DV_MAX)
+	obj.apply_central_impulse((dir + plane.global_basis.y * 0.3).normalized() * obj.mass * dv)
 	if obj.has_method("on_punched"):
 		obj.on_punched(peer, dir)
+	add_player_stat(peer, "punches_landed")
 
 
 func _act_punch_player(peer: int, args: Array) -> void:
@@ -531,6 +558,7 @@ func _act_punch_player(peer: int, args: Array) -> void:
 		return
 	var dir: Vector3 = (args[1] as Vector3).normalized()
 	push_player(target, dir * 7.0 + Vector3(0, 3.0, 0))
+	add_player_stat(peer, "players_punched")
 
 
 func _act_break_window(peer: int, args: Array) -> void:
@@ -544,6 +572,7 @@ func _act_break_window(peer: int, args: Array) -> void:
 		_window_hits.erase(i)
 		break_window(i)
 		say(display_name(peer), "...oops.", 2.0)
+		add_player_stat(peer, "windows_broken")
 	else:
 		notify(peer, "*CRACK* The window is cracking (%d/%d)" % [_window_hits[i], WINDOW_PUNCHES])
 
@@ -589,6 +618,7 @@ func _act_use_item(peer: int, args: Array) -> void:
 
 func _act_fell_out(peer: int, _args: Array) -> void:
 	add_stat("players_fell")
+	add_player_stat(peer, "times_fell_out")
 	var held: Node3D = objects.get(int(holders.get(peer, 0)))
 	if held and held.get_meta("kind") == "parachute":
 		say(display_name(peer), "*floats gently past the window with a parachute*", 3.0)
@@ -670,6 +700,8 @@ func _physics_process(dt: float) -> void:
 		_update_objects()
 		_send_snapshots(dt)
 		_check_round_end()
+		if pilot_peer != 0 and flight.phase == FlightModel.Phase.FLYING:
+			add_player_stat(pilot_peer, "pilot_seconds", dt)
 	else:
 		# Smooth toward the last snapshot; extrapolate position between packets.
 		var k := clampf(dt * 15.0, 0.0, 1.0)
@@ -779,6 +811,9 @@ func _update_objects() -> void:
 		var p := obj.global_position
 		if (flying and p.length() > LOSE_DISTANCE) or p.y < -60.0:
 			add_stat("passengers_lost" if obj.is_in_group("npc") else "items_lost")
+			for peer in holders:
+				if holders[peer] == id:
+					add_player_stat(peer, "fumbles")
 			if obj.has_method("on_lost"):
 				obj.on_lost()
 			despawn_object(id)
@@ -797,10 +832,13 @@ func _update_objects() -> void:
 		var to := pl.hold_point - obj.global_position
 		if to.length() > HOLD_SNAP:
 			_release(peer)
+			add_player_stat(peer, "fumbles")
 			notify(peer, "It slipped out of your hands!")
 			continue
-		obj.linear_velocity = (to * HOLD_GAIN).limit_length(20.0)
-		obj.angular_velocity *= 0.85
+		var gain := HOLD_GAIN / (1.0 + obj.mass / HOLD_HEAVY)
+		var want := (to * gain).limit_length(HOLD_MAX_SPEED)
+		obj.linear_velocity = obj.linear_velocity.lerp(want, HOLD_SMOOTH)
+		obj.angular_velocity *= HOLD_SPIN_DAMP
 
 
 func _send_snapshots(dt: float) -> void:
@@ -874,7 +912,7 @@ func _check_round_end() -> void:
 		return
 	if flight.phase != FlightModel.Phase.LANDED and flight.phase != FlightModel.Phase.CRASHED:
 		return
-	var r := Scoring.result(flight, stats)
+	var r := Scoring.result(flight, stats, player_stats, names)
 	for p in _ready_peers:
 		_rpc_round_end.rpc_id(p, r)
 	_rpc_round_end(r)

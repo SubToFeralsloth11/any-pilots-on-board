@@ -23,6 +23,7 @@ func _init() -> void:
 	_test_state_roundtrip()
 	_test_wall_spans()
 	_test_scoring()
+	_test_awards()
 	print("%s: %d failure(s)" % ["FAIL" if _failures else "PASS", _failures])
 	quit(_failures)
 
@@ -210,3 +211,37 @@ func _test_scoring() -> void:
 	_check(r1.score > r2.score and r3.score == 0, "runway beats a field landing; crashing scores 0")
 	stats.passengers_lost = 3
 	_check(Scoring.result(runway, stats).score < r1.score, "losing passengers costs points")
+
+
+
+func _award(list: Array[Dictionary], title: String) -> Dictionary:
+	for a in list:
+		if a.title == title:
+			return a
+	return {}
+
+
+func _test_awards() -> void:
+	_check(Scoring.awards({}, {}).is_empty(), "awards: nobody playing, no awards")
+	var solo := Scoring.awards({}, {1: "Ann"})
+	_check(solo.size() == 1 and solo[0].title == "Pacifist" and solo[0].name == "Ann",
+		"awards: solo player with zero stats only gets Pacifist (%s)" % [solo])
+	var one := Scoring.awards({1: {"windows_broken": 3.0, "pilot_seconds": 42.4}}, {1: "Ann"})
+	_check(_award(one, "Window Enthusiast").get("value") == 3.0 and _award(one, "Captain Now").get("name") == "Ann",
+		"awards: single player wins the stats they have")
+	_check("42 seconds" in str(_award(one, "Captain Now").get("text")), "awards: pilot time shown in whole seconds")
+	_check(_award(one, "Butterfingers").is_empty(), "awards: zero stats win nothing")
+	var names := {2: "Bob", 1: "Ann", 3: "Cat"}
+	var stats := {
+		3: {"windows_broken": 2.0, "punches_landed": 1.0},
+		2: {"windows_broken": 2.0, "fumbles": 4.0},
+		1: {"times_fell_out": 1.0},
+	}
+	var many := Scoring.awards(stats, names)
+	_check(_award(many, "Window Enthusiast").get("peer") == 2, "awards: ties go to the lowest peer id")
+	_check(_award(many, "Butterfingers").get("name") == "Bob", "awards: winner name comes from names")
+	_check(_award(many, "Frequent Flyer (outside the plane)").get("peer") == 1,
+		"awards: a player with no other stats can still win")
+	_check(_award(many, "Pacifist").get("peer") == 1, "awards: Pacifist is the lowest peer that never punched")
+	var calm := Scoring.awards({1: {"fumbles": 1.0}}, {1: "Ann", 2: "Bob"})
+	_check(_award(calm, "Pacifist").is_empty(), "awards: no Pacifist when nobody punched in a group")
