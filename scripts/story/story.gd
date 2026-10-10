@@ -17,7 +17,12 @@ const FLOAT_TIME := 4.0
 const PITCH_UP_KEY := "S"       ## Flight-sim style, matches Player._send_pilot_input.
 const PITCH_DOWN_KEY := "W"
 const Npc := preload("res://scripts/npcs/npc.gd")
-const CHAOS := ["turbulence", "bird", "fire", "bins", "captain", "ramp", "trolley", "air_pocket"]
+const CHAOS := ["turbulence", "bird", "fire", "bins", "captain", "ramp", "trolley", "air_pocket", "lightning",
+	"sputter", "bird_engine"]
+const FLASH_TIME := 0.6
+## Pitch lurches are eased in (rad/s): an instant pitch change would teleport the
+## cockpit metres through anything standing in it.
+const NUDGE_RATE := 0.3
 
 const LIES := ["Yeah. Totally. I've played a flight sim. Once.", "Pilot? Me? Yes. Absolutely. (No.)",
 	"I've seen Top Gun like nine times.", "Sure! How hard can it be? It's mostly buttons.",
@@ -56,12 +61,24 @@ var _check_t := 0.0
 var _tips := {}                 ## tip key -> time it was last said.
 var _shouted := {}              ## peer -> time of the last shout.
 var _flight_phase := FlightModel.Phase.FLYING
+var _flash: ColorRect
+var _flash_t := 0.0
+var _nudge := 0.0               ## Host: pitch lurch still to apply (rad).
 
 
 func setup(w: World) -> void:
 	world = w
 	world.register_action("shout", _on_shout)
 	world.pilot_changed.connect(_on_pilot_changed)
+	var layer := CanvasLayer.new()
+	layer.layer = 50
+	add_child(layer)
+	_flash = ColorRect.new()
+	_flash.color = Color(0.92, 0.95, 1.0, 0.0)
+	_flash.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_flash.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_flash.visible = false
+	layer.add_child(_flash)
 
 
 func populate() -> void:
@@ -103,6 +120,29 @@ func _rpc_objective(text: String) -> void:
 	objective = text
 
 
+# --- Lightning flash (cosmetic, every peer) ---------------------------------------------
+
+## Host. White screen flash on every peer.
+func _flash_all() -> void:
+	for p in world._ready_peers:
+		_rpc_flash.rpc_id(p)
+	_rpc_flash()
+
+
+@rpc("authority", "call_remote", "reliable")
+func _rpc_flash() -> void:
+	_flash_t = FLASH_TIME
+	_flash.visible = true
+
+
+func _process(dt: float) -> void:
+	if _flash_t <= 0.0:
+		return
+	_flash_t -= dt
+	_flash.color.a = clampf(_flash_t / FLASH_TIME, 0.0, 1.0) * (0.6 + 0.4 * float(int(_flash_t * 20.0) % 2))
+	_flash.visible = _flash_t > 0.0
+
+
 # --- Line queue (host) -----------------------------------------------------------------
 
 ## Queues a subtitle. `then` runs when the line starts; an empty text is a pause of `dur`.
@@ -133,7 +173,7 @@ func _blackout() -> void:
 	print("[story] blackout: the captain is down")
 	world.say("", "*THUD*", 1.5)
 	world.shake_all(0.9)
-	world.flight.pitch -= 0.15
+	_nudge -= 0.15
 	world.flight.bump = 0.8
 	world.npcs.captain_blackout()
 	world.npcs.panic_all(0.35)
@@ -223,6 +263,10 @@ func _physics_process(dt: float) -> void:
 		_ask_t -= dt
 		if _ask_t <= 0.0 and not world.players.is_empty():
 			_volunteer(world.players.keys().pick_random(), false)
+	if _nudge != 0.0 and f.phase == FlightModel.Phase.FLYING:
+		var step := clampf(_nudge, -NUDGE_RATE * dt, NUDGE_RATE * dt)
+		f.pitch += step
+		_nudge -= step
 	if _float_t > 0.0:
 		_float_t -= dt
 		f.bump = -0.85
@@ -277,7 +321,7 @@ func _chaos() -> void:
 	match k:
 		"turbulence":
 			world.flight.bump = 1.0
-			world.flight.pitch += randf_range(-0.06, 0.06)
+			_nudge += randf_range(-0.06, 0.06)
 			world.shake_all(0.8)
 			for id in world.objects:
 				var rb := world.objects[id] as RigidBody3D
@@ -339,6 +383,34 @@ func _chaos() -> void:
 			_float_t = FLOAT_TIME
 			world.npcs.panic_all(0.3)
 			world.say("", "AIR POCKET! Everything is... floating?! WHEEEE!", 3.0)
+		"lightning":
+			world.damage_plane("hull", 0.15)
+			_flash_all()
+			world.shake_all(0.7)
+			world.flight.bump = 0.6
+			world.npcs.panic_all(0.45)
+			world.say("", "*KRA-KOOOOM* LIGHTNING! Everyone's hair is now standing up. Even the bald guy's.", 3.5)
+		"sputter":
+			var e := randi() % 2
+			world.damage_plane("engine%d" % e, 0.3)
+			world.shake_all(0.4)
+			world.npcs.panic_all(0.2)
+			world.say("", "*cough* *cough* *BANG* The %s engine is making noises engines shouldn't make."
+				% ["left", "right"][e], 3.5)
+		"bird_engine":
+			var e := randi() % 2
+			world.damage_plane("engine%d" % e, 0.35)
+			world.shake_all(0.6)
+			world.say("", "*FWUMP* A goose flew into the %s engine. The goose did not win. Neither did the engine."
+				% ["left", "right"][e], 3.5)
+			if randf() < 0.5 and not world.plane.engine_fire[e]:
+				world.set_plane("fire:%d" % e, true)
+				_queue("ATTENDANT", "And now it's ON FIRE. Extinguisher! Wing! Somebody! GO!", 3.5)
+
+
+## Health of a plane part (1 = intact, 0 = destroyed).
+func _health(part: String) -> float:
+	return float(world.plane.damage.get(part, 1.0))
 
 
 func _chaos_ok(k: String) -> bool:
@@ -369,7 +441,7 @@ func _coach() -> void:
 	var heading_off := absf(wrapf(f.yaw, -PI, PI))
 	var engine: float = (f.engine_power[0] + f.engine_power[1]) * 0.5
 	var lined := absf(f.pos.x - FlightModel.RUNWAY_CENTER.x) < 120.0 and heading_off < 0.3 and f.pos.z > thr.z
-	if f.speed < FlightModel.STALL_SPEED + 5.0:
+	if f.stalled or f.speed < f.stall_speed() + 5.0:
 		_tip("stall", "STALL WARNING! Nose down, full throttle! [%s] + [Shift]!" % PITCH_DOWN_KEY)
 	elif alt < 120.0 and dist > 2500.0:
 		_tip("pull_up", "PULL UP! [%s]! The ground is NOT the airport!" % PITCH_UP_KEY)
@@ -383,6 +455,12 @@ func _coach() -> void:
 		_tip("fast", "Way too fast! Throttle down with [Ctrl]. This isn't a race.")
 	elif dist < 5000.0 and not lined:
 		_tip("line_up", "You're not lined up! The runway points north. Use [A]/[D] to line up.")
+	elif _health("engine0") < 0.35 or _health("engine1") < 0.35:
+		_tip("engine_out", "You've lost an engine! Use more rudder... I mean, bank the other way! Gently!")
+	elif _health("wing0") < 0.4 or _health("wing1") < 0.4:
+		_tip("wing", "Your wing looks... lighter than it should. Small turns. TINY turns.")
+	elif _health("hull") < 0.4 or _health("tail") < 0.4:
+		_tip("hull", "Flight 404, your plane is held together by hope and duct tape. Land SOON.")
 	elif engine < 0.5:
 		_tip("engine", "Your engines sound... crunchy. Maybe deal with that fire?")
 	elif dist < 3000.0 and lined and f.gear_down:

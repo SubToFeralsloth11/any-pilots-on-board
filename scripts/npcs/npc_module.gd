@@ -52,30 +52,29 @@ func populate() -> void:
 		e["name"] = names[i % names.size()]
 		e["seat"] = open_seats[i]
 		e["state"] = Npc.State.SEATED
-		_spawn("passenger", open_seats[i] - Vector3(0, 0.45, 0), e)
+		_spawn("passenger", open_seats[i] + Vector3(0, Npc.SEAT_LIFT * float(e.size), 0), e)
 	var a := _look()
 	a["name"] = "Flight Attendant"
-	a["shirt"] = Color(0.12, 0.2, 0.5)
-	a["pants"] = Color(0.12, 0.2, 0.5)
-	a["style"] = 4
 	a["size"] = 1.0
+	a["width"] = 1.0
 	a["bravery"] = 1.5
 	a["home"] = ATTENDANT_HOME
-	a["state"] = Npc.State.WALK
+	a["yaw"] = PI
+	a["state"] = Npc.State.STAND
+	a["stache"] = false
 	var c := _look()
 	c["name"] = "Captain"
-	c["shirt"] = Color(0.95, 0.95, 0.97)
-	c["pants"] = Color(0.08, 0.1, 0.25)
 	c["style"] = 0
+	c["hair"] = Color(0.75, 0.75, 0.78)
 	c["seat"] = Airliner.PILOT_SEAT
 	c["state"] = Npc.State.SEATED
 	for crew in [a, c]:
-		crew["bag"] = false
-		crew["phones"] = false
-		crew["necklace"] = false
-		crew["tie"] = false
-	_spawn("attendant", ATTENDANT_HOME, a, PI)
-	_spawn("captain", Airliner.PILOT_SEAT - Vector3(0, 0.45, 0), c)
+		for k in ["bag", "phones", "necklace", "tie", "pillow", "backpack", "mask", "short_sleeves", "beard"]:
+			crew[k] = false
+		crew["hat"] = 0
+		crew["glasses"] = 0
+	_spawn("attendant", ATTENDANT_HOME + Vector3(0, Npc.FEET, 0), a, PI)
+	_spawn("captain", Airliner.PILOT_SEAT + Vector3(0, Npc.SEAT_LIFT * float(c.size), 0), c)
 
 
 ## Random appearance shared by every peer through the spawn extra.
@@ -84,13 +83,16 @@ func _look() -> Dictionary:
 	return {"shirt": Npc.SHIRTS.pick_random(), "skin": Npc.SKIN.pick_random(), "hair": Npc.HAIR.pick_random(),
 		"pants": Color(randf_range(0.1, 0.4), randf_range(0.1, 0.3), randf_range(0.15, 0.45)),
 		"shoes": [Color(0.12, 0.1, 0.1), Color(0.95, 0.95, 0.95), Color(0.5, 0.3, 0.15), Color(0.9, 0.2, 0.3)].pick_random(),
-		"style": randi() % 8, "size": randf_range(0.85, 1.15), "width": randf_range(0.9, 1.45),
-		"bravery": randf_range(0.6, 1.4), "brow": randf_range(-0.3, 0.35),
+		"socks": [Color(0.95, 0.95, 0.95), Color(0.15, 0.15, 0.15), Color(0.9, 0.3, 0.3), Color(0.3, 0.8, 0.4)].pick_random(),
+		"style": randi() % 10, "size": randf_range(0.85, 1.15), "width": randf_range(0.9, 1.45),
+		"bravery": randf_range(0.6, 1.4), "brow": randf_range(-0.3, 0.35), "nose": randf_range(0.8, 1.6),
 		"hat": randi() % 5 if randf() < 0.4 else 0, "hat_color": accent,
-		"glasses": randf() < 0.35, "glasses_color": [Color(0.1, 0.1, 0.1), Color(0.85, 0.2, 0.25), Color(0.9, 0.75, 0.3)].pick_random(),
-		"stache": randf() < 0.25, "tie": randf() < 0.25, "tie_color": accent.darkened(0.2),
-		"bag": randf() < 0.3, "bag_color": accent.darkened(0.1), "phones": randf() < 0.15,
-		"necklace": randf() < 0.2}
+		"glasses": [0, 0, 0, 1, 1, 2].pick_random(),
+		"glasses_color": [Color(0.1, 0.1, 0.1), Color(0.85, 0.2, 0.25), Color(0.9, 0.75, 0.3)].pick_random(),
+		"stache": randf() < 0.2, "beard": randf() < 0.15, "tie": randf() < 0.25, "tie_color": accent.darkened(0.2),
+		"bag": randf() < 0.3, "bag_color": accent.darkened(0.1), "phones": randf() < 0.12,
+		"necklace": randf() < 0.2, "earrings": randf() < 0.25, "pillow": randf() < 0.15,
+		"backpack": randf() < 0.12, "mask": randf() < 0.1, "watch": randf() < 0.4, "short_sleeves": randf() < 0.4}
 
 
 func _spawn(kind: String, local: Vector3, extra: Dictionary, yaw := 0.0) -> void:
@@ -137,7 +139,7 @@ func _physics_process(dt: float) -> void:
 	if _chat_t <= 0.0:
 		_chat_t = randf_range(14.0, 26.0)
 		var calm: Array = people.filter(func(n: Node) -> bool:
-			return (n as Npc).role == "passenger" and (n as Npc).state == Npc.State.SEATED)
+			return (n as Npc).role == "passenger" and (n as Npc).state == Npc.State.SEATED and not (n as Npc).scared)
 		if not calm.is_empty():
 			(calm.pick_random() as Npc).say_line(Npc.CALM.pick_random())
 
