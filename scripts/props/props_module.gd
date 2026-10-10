@@ -2,10 +2,10 @@ extends Node
 ## Loose objects, cargo crates and items.
 ##
 ## setup() (all peers) registers a factory for every kind in Looks.SPECS and the "search" host
-## action. populate() (host) scatters ~44 pieces of cabin clutter, a drinks cart and 10 cargo
-## crates. The module also keeps debris under a cap, estimates player velocities (host) for
-## banana-peel slips, and shoves loose props out of a walking player's way. Per-object
-## behaviour lives in prop.gd.
+## action. populate() (host) scatters ~44 pieces of cabin clutter and a drinks cart (the cargo
+## hold is filled by the Cargo module). The module also keeps debris under a cap, estimates
+## player velocities (host) for banana-peel slips, and shoves loose props out of a walking
+## player's way. Per-object behaviour lives in prop.gd.
 
 const Prop := preload("res://scripts/props/prop.gd")
 const Looks := preload("res://scripts/props/prop_looks.gd")
@@ -149,7 +149,6 @@ func _act_search(peer: int, args: Array) -> void:
 
 func populate() -> void:
 	_populate_cabin()
-	_populate_cargo()
 
 
 func _spawn(kind: String, local: Vector3, yaw := 0.0, extra := {}) -> RigidBody3D:
@@ -214,22 +213,3 @@ func _populate_cabin() -> void:
 	_spawn("wrench", Vector3(0.9, 0.03, zb + 0.3), 0.8)
 	_spawn("can", Vector3(-0.3, 0.07, zf + 0.4), 0.0)
 	_spawn("can", Vector3(0.4, 0.07, zb - 0.2), 0.0)
-
-
-func _populate_cargo() -> void:
-	var lo := Airliner.CARGO_MIN
-	var hi := Airliner.CARGO_MAX
-	var cols := [lo.x + 0.5, hi.x - 0.5]
-	var zs: Array[float] = []
-	for i in 5:
-		zs.append(lo.z + 0.8 + i * minf(1.4, (hi.z - lo.z - 1.6) / 4.0))
-	# [column, z slot, level]
-	var layout := [[0, 0, 0], [0, 1, 0], [0, 2, 0], [0, 3, 0], [0, 1, 1], [0, 2, 1],
-		[1, 0, 0], [1, 1, 0], [1, 3, 0], [1, 0, 1]]
-	var labels: Array = Looks.CRATE_LABELS.duplicate()
-	labels.shuffle()
-	for i in layout.size():
-		var c: Array = layout[i]
-		var pos := Vector3(cols[c[0]] + randf_range(-0.05, 0.05), 0.45 + int(c[2]) * 0.87, zs[c[1]])
-		_spawn("crate", pos, randf_range(-0.12, 0.12),
-			{"label": labels[i % labels.size()], "tint": randf_range(0.0, 0.22)})
