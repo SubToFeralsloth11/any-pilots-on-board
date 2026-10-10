@@ -1,5 +1,6 @@
 extends RigidBody3D
-## A ragdoll person: passenger, flight attendant or the captain.
+## A ragdoll passenger. On the host a PassengerMind (passenger_mind.gd) drives their requests,
+## mood and mischief; a NeedBubble over the head shows what they want on every peer.
 ##
 ## The root body is the torso. Nine limb bodies (head, upper arms, forearms, thighs, shins)
 ## are top_level children returned by get_net_parts(). While seated, standing or walking the
@@ -12,10 +13,11 @@ extends RigidBody3D
 ## Seated people lean and sway with the felt gravity (host, replicated through the root).
 ## The root origin is the torso centre; the body faces -Z like the seats.
 
-enum State { SEATED, STAND, WALK, RAGDOLL, CARRIED, OUT }
+enum State { SEATED, STAND, WALK, RAGDOLL, CARRIED }
 enum React { NONE, FLAIL, CLUTCH, PRAY, COVER, PHONE, BOUNCE }
 
 const NpcLook := preload("res://scripts/npcs/npc_look.gd")
+const ServiceLooks := preload("res://scripts/service/service_looks.gd")
 
 const SKIN := [Color(0.98, 0.84, 0.7), Color(0.87, 0.67, 0.5), Color(0.66, 0.46, 0.32),
 	Color(0.45, 0.3, 0.2), Color(1.0, 0.75, 0.62)]
@@ -43,9 +45,6 @@ const THROWN := ["WAAAAAH!", "I'M FLYIIING!", "YEET—", "NOT AGAIN!"]
 const OUCH := ["OW! I'm suing!", "Rude!", "My glasses!", "I'll write a review about this!", "...ow."]
 const STAND_UP := ["I'm OK!", "Nothing broken! ...probably.", "Who did that?!", "*dizzy noises*",
 	"Back to my seat. With DIGNITY."]
-const MUMBLES := ["mmh... more fish...", "...pull up... pull... pudding...", "zzz... cleared for... nap...",
-	"...mother? is that you...?", "...the cockpit is lava...", "...autopilot... auto... potato...",
-	"*snore* ...landing... gear... spaghetti..."]
 const CALM := ["Is the fish good?", "My ears just popped.", "Ooh, clouds.", "Are we there yet?",
 	"I'm only here for the peanuts.", "*loud chewing*", "Can I recline? I'm reclining."]
 
@@ -98,7 +97,11 @@ var world: World
 var role := "passenger"
 var display := "Passenger"
 var seat := Vector3.ZERO      ## Plane-local seat point (cushion height).
-var home := Vector3.ZERO      ## Plane-local standing spot (attendant, captain while awake).
+var home := Vector3.ZERO      ## Plane-local spot a standing passenger walks to (mischief).
+var contract := 0             ## Airline contract id this passenger belongs to.
+var kind := "tourists"        ## Contract kind (temperament), see PassengerMind.PROFILES.
+var child := false
+var mind: PassengerMind       ## Host only.
 var panic := 0.0
 var bravery := 1.0
 var state := State.SEATED
@@ -116,7 +119,8 @@ var _joint_child: Array[int] = []
 var _joints_on := false
 var _active := false                    ## Limbs simulated by physics (streamed by World).
 var _limbs_physical := true             ## Limb bodies currently in the physics space.
-var _unconscious := false               ## Captain after the blackout.
+var _need: NeedBubble
+var _seat_on_drop := false               ## Host: dropped (not thrown) this frame; may sit down.
 var _legs_shape: CollisionShape3D
 var _head_shape: CollisionShape3D       ## Stands in for the head while the limbs are posed.
 var _belt: Node3D
@@ -160,7 +164,9 @@ func _init(w: World, p_role: String, extra: Dictionary) -> void:
 	react = int(extra.get("react", React.NONE)) as React
 	scared = extra.get("scared", false)
 	_active = extra.get("active", false)
-	_unconscious = extra.get("unconscious", false)
+	contract = int(extra.get("contract", 0))
+	kind = String(extra.get("kind", "tourists"))
+	child = extra.get("child", false)
 	_yaw = extra.get("yaw", 0.0)
 	_size = extra.get("size", 1.0)
 	_width = extra.get("width", 1.0)
@@ -168,6 +174,27 @@ func _init(w: World, p_role: String, extra: Dictionary) -> void:
 	_think = randi() % THINK_EVERY
 	_look = NpcLook.new(extra, role)
 	_xf_buf.resize(LIMBS)
+
+
+static var _grip: PhysicsMaterial
+static var _glide: PhysicsMaterial
+
+
+## Grippy contact for limp bodies and limbs (ragdolls don't skate around).
+static func _grip_mat() -> PhysicsMaterial:
+	if _grip == null:
+		_grip = PhysicsMaterial.new()
+		_grip.friction = 0.6
+		_grip.bounce = 0.05
+	return _grip
+
+
+## Near-frictionless feet while walking upright: steering does the work, tilts still slide them.
+static func _glide_mat() -> PhysicsMaterial:
+	if _glide == null:
+		_glide = PhysicsMaterial.new()
+		_glide.friction = 0.05
+	return _glide
 
 
 func _ready() -> void:
@@ -178,10 +205,7 @@ func _ready() -> void:
 	mass = TORSO_MASS
 	angular_damp = 2.0
 	continuous_cd = true
-	var pm := PhysicsMaterial.new()
-	pm.friction = 0.6
-	pm.bounce = 0.05
-	physics_material_override = pm
+	physics_material_override = _grip_mat()
 	var s := _size
 	var torso := CollisionShape3D.new()
 	var tb := BoxShape3D.new()
@@ -208,8 +232,11 @@ func _ready() -> void:
 	_belt = _look.build_seatbelt(vis)
 	_build_limbs()
 	_build_bubble()
+	_need = NeedBubble.new()
+	add_child(_need)
 	_pose = _target_pose().duplicate()
 	if world.is_server():
+		mind = PassengerMind.new(self, world, kind)
 		_build_joints()
 		_build_hitbox()
 		_scream_t = randf_range(1.0, 4.0)
@@ -235,7 +262,7 @@ func _build_limbs() -> void:
 		p.angular_damp = 3.5
 		p.linear_damp = 0.05
 		p.continuous_cd = true
-		p.physics_material_override = physics_material_override
+		p.physics_material_override = _grip_mat()
 		p.set_meta("net_id", id)
 		p.add_to_group("grabbable")
 		# Out of the physics space until posed (see _sync_limb_physics).
@@ -419,11 +446,8 @@ func _target_pose() -> Dictionary:
 		State.SEATED:
 			# Shins angled so feet reach the floor; small people's feet dangle.
 			_legs(p, PI / 2, 1.4, PI / 2, 1.5, 0.1)
-			if role == "captain":
-				_arms(p, 1.15, -0.1, 0.35, 1.15, -0.1, 0.35)
-			else:
-				_arms(p, 0.5, -0.1, 1.0, 0.5, -0.1, 1.0)
-				p.head = Vector3(sin(t * 0.4) * 0.08, sin(t * 0.3) * 0.25, 0)
+			_arms(p, 0.5, -0.1, 1.0, 0.5, -0.1, 1.0)
+			p.head = Vector3(sin(t * 0.4) * 0.08, sin(t * 0.3) * 0.25, 0)
 		State.STAND, State.WALK:
 			var gait := clampf(_speed_vis / WALK_SPEED, 0.0, 1.2)
 			var sw := sin(_gait) * 0.45 * gait
@@ -522,18 +546,18 @@ func _process(dt: float) -> void:
 			_place_limbs()
 		else:
 			_sync_limb_physics()
-	_belt.visible = state == State.SEATED and role == "passenger"
+	_belt.visible = state == State.SEATED
+	var head := _parts[HEAD].global_position
 	if _bubble.visible:
-		_bubble.global_position = _parts[HEAD].global_position + Vector3(0, 0.5 * _size, 0)
+		_bubble.global_position = head + Vector3(0, 0.5 * _size, 0)
 		_bubble_t -= dt
 		if _bubble_t <= 0.0:
 			_bubble.visible = false
+	_need.tick(dt, head + Vector3(0, (0.95 if _bubble.visible else 0.6) * _size, 0))
 	_look.set_face(_face(), _anim_t, dt, scared and react == React.PHONE and not _active)
 
 
 func _face() -> NpcLook.Face:
-	if state == State.OUT or (_unconscious and state == State.CARRIED):
-		return NpcLook.Face.OUT
 	if state == State.RAGDOLL:
 		return NpcLook.Face.HURT
 	if state == State.CARRIED:
@@ -555,20 +579,24 @@ func on_net_event(event: String, args: Array) -> void:
 	match event:
 		"say":
 			show_bubble(args[0])
+		"need":
+			_need.show_need(args[0], args[1], args[2])
 		"state":
 			state = int(args[0]) as State
 			react = int(args[1]) as React
 			scared = args[2]
 			_active = args[3]
-			_unconscious = args[4]
 
 
 func get_prompt() -> String:
-	if role == "captain":
-		return "Grab the Captain [E]  Slap [LMB]" if _unconscious else "Grab the Captain [E]"
-	if role == "attendant":
-		return "Grab the flight attendant [E]  Punch [LMB]"
+	if _need.visible:
+		return "%s wants: %s  Grab [E]  Punch [LMB]" % [display, ServiceLooks.NAMES.get(_need.need, _need.need)]
 	return "Grab %s [E]  Punch [LMB]" % display
+
+
+## What this passenger is asking for right now ("" = nothing). Every peer.
+func wants() -> String:
+	return _need.need if _need.visible else ""
 
 
 func get_spawn_extra() -> Dictionary:
@@ -577,8 +605,8 @@ func get_spawn_extra() -> Dictionary:
 	e["react"] = react
 	e["scared"] = scared
 	e["active"] = _active
-	e["unconscious"] = _unconscious
 	e["home"] = home
+	e["seat"] = seat
 	return e
 
 
@@ -591,6 +619,47 @@ func net_parts_active() -> bool:
 	return _active
 
 
+# --- Host: hooks used by PassengerMind -----------------------------------------------------
+
+## Host. Shows (or hides with "") the request bubble on every peer.
+func show_need(item: String, total: float, left: float) -> void:
+	world.object_event(World.net_id(self), "need", [item, total, left])
+
+
+## Host. Enjoys a served item.
+func eat(item: String) -> void:
+	say_line({"meal": "*nom nom nom*", "drink": "*slurrrrp*", "coffee": "*sip* ...ahhh.",
+		"blanket": "*snuggles into the blanket*"}.get(item, "*happy noises*"))
+	panic = 0.0
+
+
+## Host. Gets up (if seated) and walks to the plane-local `spot`.
+func roam(spot: Vector3) -> void:
+	home = Vector3(spot.x, 0, spot.z)
+	if state == State.SEATED and _blend_t < 0.0:
+		var front := Vector3(seat.x, 0, seat.z - ROW_FRONT)
+		_start_blend(State.STAND, world.plane.global_transform * Transform3D(Basis.IDENTITY,
+			front + Vector3(0, FEET * _size, 0)))
+	elif state == State.WALK:
+		_set_state(State.STAND)
+
+
+## Plane-local aisle spot near this passenger's row (offset `dz` along the cabin).
+func aisle_spot(dz := 0.0) -> Vector3:
+	return Vector3(randf_range(-0.5, 0.5), 0, clampf(seat.z + dz, -8.8, 5.6))
+
+
+## Plane-local position of a crew member (for chasing them).
+func crew_spot(peer: int) -> Vector3:
+	var p: Player = world.players.get(peer)
+	return world.plane.to_local(p.global_position) if p else aisle_spot()
+
+
+## Plane-local spot in front of the over-wing exit on `side`.
+func exit_spot(side: String) -> Vector3:
+	return Vector3((-1.0 if side == "left" else 1.0) * 2.2, 0, 0)
+
+
 # --- Host behaviour ---------------------------------------------------------------------
 
 ## Host. Says a line in a speech bubble on every peer.
@@ -600,13 +669,11 @@ func say_line(text: String) -> void:
 
 ## Host. Raises panic (scaled by this person's bravery).
 func add_panic(amount: float) -> void:
-	if role == "captain":
-		return
 	panic = clampf(panic + amount / bravery, 0.0, 1.5)
 
 
 func _sync() -> void:
-	world.object_event(World.net_id(self), "state", [state, react, scared, _active, _unconscious])
+	world.object_event(World.net_id(self), "state", [state, react, scared, _active])
 
 
 func _set_state(s: State) -> void:
@@ -617,7 +684,8 @@ func _set_state(s: State) -> void:
 
 ## Host. Configures the bodies for the current state.
 func _apply_physics() -> void:
-	var limp := state == State.RAGDOLL or state == State.CARRIED or state == State.OUT
+	var limp := state == State.RAGDOLL or state == State.CARRIED
+	physics_material_override = _grip_mat() if limp else _glide_mat()
 	if limp:
 		_blend_t = -1.0
 		_active = true
@@ -693,23 +761,21 @@ func _physics_process(dt: float) -> void:
 			global_transform = _seat_xform()
 			if think:
 				_check_suction()
+				mind.tick(_think_dt, not scared)
 		State.STAND:
 			_stand(dt)
 			if think:
 				_check_suction()
+				_mischief(_think_dt)
 		State.WALK:
 			_walk_to_seat(dt)
 			if think:
 				_check_suction()
+				mind.tick(_think_dt, false)
 		State.RAGDOLL:
 			_timer -= dt
 			if _timer <= 0.0 and linear_velocity.length() < 1.5:
 				_recover()
-		State.OUT:
-			_timer -= dt
-			if _timer <= 0.0:
-				_timer = randf_range(12.0, 25.0)
-				say_line(MUMBLES.pick_random())
 	if think:
 		_update_panic(_think_dt)
 		_think_dt = 0.0
@@ -780,13 +846,17 @@ func _check_suction() -> void:
 		ragdoll(suck.normalized() * mass * 3.0)
 
 
+## Host. Standing at a mischief spot: let the mind act; back to the seat when it's done, or
+## straight away when the seatbelt sign comes on (unless they're furious).
+func _mischief(dt: float) -> void:
+	mind.tick(dt, false)
+	var behave: bool = world.seatbelt_sign and not mind.enraged()
+	if mind.act == "" or behave or not mind.stand_tick(dt):
+		mind.end_act()
+		_set_state(State.WALK)
+
+
 func _stand(dt: float) -> void:
-	if role == "captain":
-		_timer -= dt
-		_steer(Vector3.ZERO, 0.0)
-		if _timer <= 0.0:
-			knock_out()
-		return
 	var local := world.plane.to_local(global_position)
 	var to := Vector3(home.x - local.x, 0, home.z - local.z)
 	if to.length() > 0.4:
@@ -807,6 +877,9 @@ func _walk_to_seat(dt: float) -> void:
 	var front := Vector3(seat.x, 0, seat.z - ROW_FRONT)
 	var off := Vector2(local.x - front.x, local.z - front.z)
 	if off.length() < 0.3 or _stuck_t > 6.0:
+		if _player_in_seat():
+			_find_other_seat(local)
+			return
 		_start_blend(State.SEATED)
 		return
 	var target: Vector3
@@ -856,14 +929,37 @@ func _recover() -> void:
 	_yaw = atan2(-fwd.x, -fwd.z)
 	say_line(STAND_UP.pick_random())
 	_stuck_t = 0.0
-	_start_blend(State.WALK if role == "passenger" else State.STAND,
-		Transform3D(Basis(Vector3.UP, _yaw), (hit.position as Vector3) + Vector3.UP * FEET * _size))
+	_start_blend(State.WALK, Transform3D(Basis(Vector3.UP, _yaw), (hit.position as Vector3) + Vector3.UP * FEET * _size))
+
+
+## Host. True when a player sits in this passenger's seat.
+func _player_in_seat() -> bool:
+	for id in world.players:
+		var p: Player = world.players[id]
+		if p.seated and p.seat_local.distance_to(seat) < 0.1:
+			return true
+	return false
+
+
+## Host. Someone pinched our seat: complain and take the nearest free one (or loiter here).
+func _find_other_seat(local: Vector3) -> void:
+	say_line(["Excuse me, that's MY seat!", "Um. You're in my seat.", "I paid for that seat!"].pick_random())
+	if mind:
+		mind.change(-0.1)
+	var other: Vector3 = world.npcs.free_seat_near(local)
+	_stuck_t = 0.0
+	if other == Vector3.INF:
+		home = local
+		_set_state(State.STAND)
+		return
+	seat = other
+	_extra["seat"] = seat
 
 
 ## Host. Kinematically blends root and limbs from where they are to the target state's pose.
 ## Getting up from the floor goes through a crouch first.
 func _start_blend(target: State, root_target := Transform3D()) -> void:
-	var from_floor := state == State.RAGDOLL or state == State.OUT
+	var from_floor := state == State.RAGDOLL
 	_blend_capture()
 	_blend_root = root_target
 	_blend_t = 0.0
@@ -917,11 +1013,11 @@ func _step_blend(dt: float) -> void:
 	_sync()
 
 
-## Host. Knocks this person over for `duration` seconds (unconscious people just get shoved).
+## Host. Knocks this person over for `duration` seconds.
 func ragdoll(impulse: Vector3, duration := RAGDOLL_TIME) -> void:
 	add_panic(0.25)
 	var from_seat := state == State.SEATED
-	if state != State.OUT and state != State.CARRIED:
+	if state != State.CARRIED:
 		_set_state(State.RAGDOLL)
 		_timer = duration
 	if from_seat:
@@ -937,34 +1033,8 @@ func _lift_out() -> void:
 	for p in _parts:
 		p.global_position += up
 
-
-## Host. The captain faints (from the pilot seat he slumps onto the floor beside it).
-func knock_out() -> void:
-	_unconscious = true
-	var from_seat := state == State.SEATED
-	_timer = randf_range(6.0, 12.0)
-	_set_state(State.OUT)
-	if from_seat:
-		_lift_out()
-	var side := world.plane.global_basis.x * (-1.0 if seat.x <= 0.0 else 1.0)
-	apply_central_impulse((side * 2.5 + world.plane.global_basis.z * 0.5) * mass)
-	angular_velocity = world.plane.global_basis.z * randf_range(2.0, 3.0)
-
-
-## Host. The captain briefly gets up, says something, then faints again.
-func wake_up(line: String) -> void:
-	if state != State.OUT:
-		return
-	_unconscious = false
-	_recover()
-	if state == State.OUT:
-		_unconscious = true
-		return
-	_timer = 4.5 + BLEND_TIME * 2.0
-	say_line(line)
-
-
 func _on_hit(body: Node3D) -> void:
+
 	var rb := body as RigidBody3D
 	if rb == null or rb == self or _parts.has(rb) or state == State.CARRIED or _grace > 0.0 or rb.freeze:
 		return
@@ -985,18 +1055,39 @@ func can_grab(_peer: int) -> bool:
 
 func on_grabbed(_peer: int) -> void:
 	add_panic(0.3)
-	say_line("...zzz..." if _unconscious else GRABBED.pick_random())
+	say_line(GRABBED.pick_random())
+	mind.calm_down()
 	_set_state(State.CARRIED)
 
 
+## Dropped [E] (not thrown) next to a free seat: they sit down in it and buckle up.
 func on_released() -> void:
-	if state == State.CARRIED:
-		_set_state(State.OUT if _unconscious else State.RAGDOLL)
-		_timer = RELEASE_TIME
+	if state != State.CARRIED:
+		return
+	_set_state(State.RAGDOLL)
+	_timer = RELEASE_TIME
+	_seat_on_drop = true
+	call_deferred("_settle_after_drop")
+
+
+func _settle_after_drop() -> void:
+	if not _seat_on_drop or state != State.RAGDOLL:
+		return
+	_seat_on_drop = false
+	var local := world.plane.to_local(global_position)
+	var near: Vector3 = seat if Vector2(seat.x - local.x, seat.z - local.z).length() < 1.4 \
+		else world.npcs.free_seat_near(local, 1.4)
+	if near == Vector3.INF:
+		return
+	seat = near
+	_extra["seat"] = seat
+	say_line(["Fine! FINE! I'm sitting.", "Okay, okay, I'll behave.", "Hmph. Buckling up."].pick_random())
+	_start_blend(State.SEATED)
 
 
 func on_thrown(_peer: int) -> void:
-	say_line("...wheee... zzz..." if _unconscious else THROWN.pick_random())
+	_seat_on_drop = false
+	say_line(THROWN.pick_random())
 	for p in _parts:
 		p.linear_velocity = linear_velocity
 	if state == State.RAGDOLL:
@@ -1004,19 +1095,12 @@ func on_thrown(_peer: int) -> void:
 
 
 func on_punched(_peer: int, dir: Vector3) -> void:
-	if _unconscious:
-		say_line("...five more minutes...")
-		apply_central_impulse(dir * 40.0)
-		return
 	say_line(OUCH.pick_random())
+	if mind:
+		mind.change(-0.08)
 	ragdoll(dir * 60.0 + Vector3(0, 40, 0))
 
 
 func on_lost() -> void:
-	match role:
-		"captain":
-			world.say("", "The captain has left the plane. Like, physically.", 3.0)
-		"attendant":
-			world.say("", "The flight attendant has exited the aircraft. Service is suspended.", 3.0)
-		_:
-			world.say(display, "WHEEEEEEEEEEEEEEE—", 2.5)
+	world.say(display, "WHEEEEEEEEEEEEEEE—", 2.5)
+	world.npcs.note_lost(self)

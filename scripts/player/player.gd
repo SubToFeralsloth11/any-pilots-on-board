@@ -586,7 +586,7 @@ func _update_aim() -> void:
 	ray.target_position = Vector3(0, 0, -reach)
 	ray.force_raycast_update()
 	if not ray.is_colliding():
-		aim_prompt = "Drop [E]  Throw [LMB]  Use [RMB]" if held_id else ""
+		aim_prompt = _held_prompt()
 		return
 	var c := ray.get_collider()
 	if c is Interactable:
@@ -611,9 +611,17 @@ func _update_aim() -> void:
 		elif c.is_in_group("grabbable"):
 			aim_prompt = "Pick up [E]"
 	if held_id:
-		aim_prompt = "Drop [E]  Throw [LMB]  Use [RMB]"
+		aim_prompt = _held_prompt()
 	elif seated:
 		aim_prompt = "Get up [E]"
+
+
+## Prompt while carrying something (items may describe their own [RMB] use).
+func _held_prompt() -> String:
+	if not held_id:
+		return ""
+	var h := world.get_object(held_id)
+	return h.held_prompt() if h and h.has_method("held_prompt") else "Drop [E]  Throw [LMB]  Use [RMB]"
 
 
 func _on_interact() -> void:
