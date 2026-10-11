@@ -1,0 +1,77 @@
+name: Build
+
+on:
+  push:
+    branches: ['**']
+  release:
+    types: [published]
+
+env:
+  GODOT_VERSION: 4.7.2
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Godot
+        id: cache-godot
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/godot
+            ~/.local/share/godot/export_templates
+          key: godot-${{ env.GODOT_VERSION }}
+
+      - name: Install Godot and export templates
+        if: steps.cache-godot.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p ~/godot ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
+          cd ~/godot
+          gh release download ${GODOT_VERSION}-stable -R godotengine/godot \
+            -p "Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip" \
+            -p "Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+          unzip -q "Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          mv "Godot_v${GODOT_VERSION}-stable_linux.x86_64" godot
+          unzip -q "Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+          mv templates/* ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/
+          rm -rf templates *.zip *.tpz
+
+      - name: Import project
+        run: ~/godot/godot --headless --import
+
+      - name: Run tests
+        run: ~/godot/godot --headless -s res://tests/run_tests.gd
+
+      - name: Export Windows, macOS and Linux
+        run: |
+          mkdir -p export/windows export/macos export/linux dist
+          for preset in Windows macOS Linux; do
+            ~/godot/godot --headless --export-release "$preset" 2>&1 | tee "export-$preset.log"
+            if grep -q '^ERROR' "export-$preset.log"; then
+              echo "::error::Export failed for $preset"
+              exit 1
+            fi
+          done
+          (cd export/windows && zip -q ../../dist/AnyPilotsOnBoard-windows.zip AnyPilotsOnBoard.exe)
+          (cd export/linux && zip -q ../../dist/AnyPilotsOnBoard-linux.zip AnyPilotsOnBoard.x86_64)
+          cp export/macos/AnyPilotsOnBoard.zip dist/AnyPilotsOnBoard-macos.zip
+          ls -la dist
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: AnyPilotsOnBoard-${{ github.sha }}
+          path: dist/*.zip
+          retention-days: 14
+
+      - name: Attach binaries to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/*.zip --clobber
