@@ -156,7 +156,7 @@ func _build_lights(b: Blocks, glow: Blocks) -> void:
 		for sx in [-1.0, 1.0]:
 			glow.box(Vector3(1.2, 1.0, 1.2), Vector3(sx * (HALF.x + 2), 0.6, z), white)
 		z += 60.0
-	for x in range(-34, 35, 5):
+	for x in range(-int(HALF.x) + 1, int(HALF.x), 5):
 		glow.box(Vector3(1.4, 1.0, 1.4), Vector3(x, 0.6, HALF.y + 3), Color(0.2, 1.0, 0.3))
 		glow.box(Vector3(1.4, 1.0, 1.4), Vector3(x, 0.6, -HALF.y - 3), Color(1.0, 0.2, 0.15))
 	# Approach light bars on poles, with a crossbar 300 m out.

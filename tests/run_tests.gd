@@ -6,6 +6,7 @@ const DT := 1.0 / 60.0
 
 const WeatherCells := preload("res://scripts/weather/weather_cells.gd")
 const VoiceCodec := preload("res://scripts/net/voice_codec.gd")
+const Contracts := preload("res://scripts/airline/contracts.gd")
 
 var _failures := 0
 
@@ -37,6 +38,10 @@ func _init() -> void:
 	_test_payout_diversion()
 	_test_payout_damaged_cargo()
 	_test_payout_empty_manifest()
+	_test_payout_partial_cargo()
+	_test_contracts_deterministic()
+	_test_autopilot_converges_to_cruise()
+	_test_autopilot_limits()
 	_test_weather_cells_deterministic()
 	_test_weather_intensity_falloff()
 	_test_voice_codec_roundtrip()
@@ -131,7 +136,7 @@ func _test_hard_touchdown_crashes() -> void:
 
 
 func _test_banked_touchdown_crashes() -> void:
-	var f := _approach(true, 1.0, 0.4)
+	var f := _approach(true, 1.0, 0.7)
 	f.pos.y = 0.01
 	f.roll_in = 1.0   # Holding the bank right onto the runway.
 	_run(f)
@@ -414,6 +419,74 @@ func _test_payout_damaged_cargo() -> void:
 
 func _test_payout_empty_manifest() -> void:
 	_check(Scoring._test_payout_empty_manifest(), "payout: empty manifest yields zero")
+
+
+func _test_payout_partial_cargo() -> void:
+	var c := [{"id": 1, "type": "cargo", "kind": "mail", "name": "Mail", "count": 4, "payout": 1000, "risk": 1, "accepted": true}]
+	var r := Scoring.payout(c, {}, {1: {"units": 4, "delivered": 3, "condition": 1.0}},
+		{"landed": true, "on_runway": true, "diverted": false, "crashed": false}, {}, [], [], 0)
+	_check(r.total == 750, "payout: 3 of 4 cargo units delivered pays 3/4 (got %d)" % r.total)
+
+
+func _test_contracts_deterministic() -> void:
+	var a := Contracts.generate(7)
+	var b := Contracts.generate(7)
+	_check(a == b and not a.is_empty(), "contracts: same flight number -> identical contracts and order")
+	var differs := false
+	for n in range(1, 6):
+		if Contracts.generate(n) != a:
+			differs = true
+	_check(differs, "contracts: other flight numbers offer something else")
+	var ok := true
+	for n in range(1, 40):
+		var cs := Contracts.generate(n)
+		var pax := cs.filter(func(c: Dictionary) -> bool: return c.type == "passengers")
+		var ids := cs.map(func(c: Dictionary) -> int: return c.id)
+		ids.sort()
+		ok = ok and cs.size() >= 5 and cs.size() <= 7 and pax.size() >= 3 and ids == range(1, cs.size() + 1) \
+			and pax.any(func(c: Dictionary) -> bool: return c.kind == "tourists")
+	_check(ok, "contracts: 5-7 offers with unique ids, >=3 passenger contracts incl. tourists")
+
+
+## Disturbed (banked, nose low, slow, heading away) -> level cruise toward the destination.
+func _test_autopilot_converges_to_cruise() -> void:
+	for start: Array in [[Vector3(2400, 550, -3000), 1.0, 0.5, -0.1, 55.0], [Vector3(1000, 900, -8000), -2.5, -0.6, 0.15, 85.0]]:
+		var f := FlightModel.new()
+		f.phase = FlightModel.Phase.FLYING
+		f.pos = start[0]
+		f.yaw = start[1]
+		f.roll = start[2]
+		f.pitch = start[3]
+		f.velocity = f.forward() * float(start[4])
+		f.throttle = 0.4
+		f.gear_down = false
+		_check(f.engage_autopilot() == "", "autopilot: engages in flight")
+		_sim(f, 60.0)
+		var to := FlightModel.runway_threshold() - f.pos
+		var heading_err := wrapf(atan2(-to.x, -to.z) - f.yaw, -PI, PI)
+		_check(f.autopilot and f.phase == FlightModel.Phase.FLYING and absf(f.pos.y - FlightModel.AP_CRUISE_ALT) < 25.0
+			and absf(f.velocity.y) < 1.0 and absf(f.roll) < 0.05 and absf(heading_err) < 0.05
+			and absf(f.speed - FlightModel.AP_CRUISE_SPEED) < 3.0,
+			"autopilot: level cruise toward destination in 60 s (alt %.0f vs %.2f roll %.3f hdg %.3f spd %.1f)" % [
+				f.pos.y, f.velocity.y, f.roll, heading_err, f.speed])
+
+
+func _test_autopilot_limits() -> void:
+	var parked := FlightModel.new()
+	_check(parked.engage_autopilot() != "" and not parked.autopilot, "autopilot: refuses on the ground (no takeoff)")
+	var low := _cruising(Vector3(2400, 100, -5000))
+	_check(low.engage_autopilot() != "", "autopilot: refuses below %d m" % int(FlightModel.AP_MIN_ALT))
+	var f := _cruising(FlightModel.runway_threshold() + Vector3(0, 600, 4400))
+	var reasons: Array[String] = []
+	f.autopilot_disengaged.connect(func(r: String) -> void: reasons.append(r))
+	_check(f.engage_autopilot() == "", "autopilot: engages 4.4 km out")
+	_sim(f, 15.0)
+	_check(not f.autopilot and reasons.size() == 1, "autopilot: hands over ~4 km from the destination (no landing)")
+	var unmanned := _cruising(Vector3(2400, 700, -5000))
+	unmanned.engage_autopilot()
+	unmanned.has_pilot = false
+	_sim(unmanned, 30.0)
+	_check(unmanned.autopilot and absf(unmanned.pos.y - 700.0) < 30.0, "autopilot: keeps flying with nobody in the seat")
 
 
 func _test_weather_cells_deterministic() -> void:
