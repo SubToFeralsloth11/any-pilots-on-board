@@ -1,6 +1,44 @@
 <!DOCTYPE html>
 <html lang="en">
-	<head>
+	<head><script>(() => {
+  const PARTS = 0, PREFIX = 'eq-game-any-pilots-on-board-', NAME = PREFIX + '134ed84-1794103275';
+  const net = window.fetch.bind(window);
+  const download = async (file) => {
+    const r = await net(file);
+    if (!r.ok) throw new Error('missing game file ' + file);
+    return r.blob();
+  };
+  const get = async (file) => {
+    let cache;
+    try { cache = await caches.open(NAME); const hit = await cache.match(file); if (hit) return hit.blob(); } catch { cache = null; }
+    const blob = await download(file);
+    if (cache) cache.put(file, new Response(blob)).catch(() => {}); // full disk: just skip caching
+    return blob;
+  };
+  caches.keys().then((ks) => ks.forEach((k) => k.startsWith(PREFIX) && k !== NAME && caches.delete(k))).catch(() => {});
+  window.fetch = (u, o) => {
+    const file = typeof u === 'string' ? u.split('?')[0].split('/').pop() : '';
+    if (file !== 'index.pck' && file !== 'index.wasm') return net(u, o);
+    const files = file === 'index.pck' && PARTS ? Array.from({ length: PARTS }, (_, i) => 'index.pck.' + String(i).padStart(3, '0')) : [file];
+    const type = file === 'index.wasm' ? 'application/wasm' : 'application/octet-stream';
+    return Promise.all(files.map(get)).then((b) => {
+      const all = new Blob(b, { type });
+      return new Response(all, { headers: { 'Content-Length': String(all.size), 'Content-Type': type } });
+    });
+  };
+  let wantLock = false;
+  const lock = HTMLCanvasElement.prototype.requestPointerLock, unlock = Document.prototype.exitPointerLock;
+  HTMLCanvasElement.prototype.requestPointerLock = function (...a) {
+    wantLock = true;
+    try { const p = lock.apply(this, a); if (p && p.catch) p.catch(() => {}); return p; } catch { return undefined; }
+  };
+  Document.prototype.exitPointerLock = function (...a) { wantLock = false; return unlock.apply(this, a); };
+  document.addEventListener('mousedown', (e) => {
+    if (!wantLock || document.pointerLockElement || !(e.target instanceof HTMLCanvasElement)) return;
+    try { const p = lock.call(e.target); if (p && p.catch) p.catch(() => {}); } catch {}
+  }, true);
+})();
+</script>
 		<meta charset="utf-8">
 		<meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1.0">
 		<title>Any Pilots On Board?</title>
