@@ -48,6 +48,7 @@ const OutsideScene := preload("res://scripts/outside/outside.gd")
 const HudScript := preload("res://scripts/ui/hud.gd")
 const WeatherModule := preload("res://scripts/weather/weather.gd")
 const CargoModule := preload("res://scripts/cargo/cargo_module.gd")
+const ServiceModule := preload("res://scripts/service/service_module.gd")
  
 var flight := FlightModel.new()
 var plane: Airliner
@@ -62,6 +63,7 @@ var pings: Node
 var voice: Node
 var weather: Node
 var cargo: Node
+var service: Node
 var objects_root: Node3D
 var players_root: Node3D
 
@@ -116,6 +118,7 @@ func _ready() -> void:
 	pings = _add_module(PingsModule, "Pings")
 	weather = _add_module(WeatherModule, "Weather")
 	cargo = _add_module(CargoModule, "Cargo")
+	service = _add_module(ServiceModule, "Service")
 	hud = HudScript.new()
 	hud.name = "Hud"
 	hud.set("world", self)
@@ -544,6 +547,9 @@ func _register_core_actions() -> void:
 		if peer == pilot_peer:
 			set_seatbelt(not seatbelt_sign)
 			notify(peer, "Seatbelt sign %s" % ("ON" if seatbelt_sign else "OFF")))
+	register_action("autopilot", _act_autopilot)
+	flight.autopilot_disengaged.connect(func(reason: String) -> void:
+		say("TOWER", "Autopilot disconnected: %s. You have control." % reason, 4.0))
 
 
 func _player_near(peer: int, global_p: Vector3, reach: float) -> bool:
@@ -656,6 +662,19 @@ func _act_pilot_enter(peer: int, _args: Array) -> void:
 func _act_gear(peer: int, _args: Array) -> void:
 	if peer == pilot_peer and flight.phase == FlightModel.Phase.FLYING:
 		set_plane("gear", not flight.gear_down)
+
+
+## Pilot toggles the autopilot (FlightModel keeps flying it after the pilot leaves the seat).
+func _act_autopilot(peer: int, _args: Array) -> void:
+	if peer != pilot_peer:
+		return
+	if flight.autopilot:
+		flight.autopilot = false
+		notify(peer, "Autopilot OFF. You have control.")
+		return
+	var refusal := flight.engage_autopilot()
+	notify(peer, "Autopilot ON: holding %d m toward the destination. It will NOT land." % int(FlightModel.AP_CRUISE_ALT) \
+		if refusal == "" else "Autopilot unavailable: %s." % refusal)
 
 
 ## Right-click with something in hand: the held object's own use(peer, origin, dir) runs on the host.
@@ -961,24 +980,14 @@ func _net_node(key: int) -> Node3D:
 func _check_round_end() -> void:
 	if round_over:
 		return
-	# Only end round if flight phase is LANDED/CRASHED AND airline phase is 'flight'
-	# (not during manifest or boarding)
+	# Rounds end only in the airline's flight phase (the plane sits parked during manifest/boarding).
 	if flight.phase != FlightModel.Phase.LANDED and flight.phase != FlightModel.Phase.CRASHED:
 		return
-	if airline != null:
-		var airline_phase: String = airline.phase
-		if airline_phase != "flight":
-			return
+	if airline.phase != "flight":
+		return
 	var r := Scoring.result(flight, stats, player_stats, names)
-	# Add airline payout if available
-	if airline != null and airline.has_method("compute_payout"):
-		var payout: Dictionary = airline.compute_payout()
-		r.payout = payout
-		# Update bank with payout total
-		if payout.has("total"):
-			airline.bank += payout.total
-		# Tell airline to persist
-		airline._on_round_end(r)
+	# The Airline banks and persists the payout once and moves every peer to the report phase.
+	r.payout = airline.finish_round()
 	for p in _ready_peers:
 		_rpc_round_end.rpc_id(p, r)
 	_rpc_round_end(r)

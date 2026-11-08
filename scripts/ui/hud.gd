@@ -1,7 +1,7 @@
 extends CanvasLayer
 ## HUD: crosshair and aim prompt, subtitles, toasts, objective, flight strip, the pilot panel,
-## a controls cheat-sheet, the pause menu, the results screen, crash flash and the ambience.
-## Also: manifest board UI, phase banner, and payout report.
+## a controls cheat-sheet, the pause menu, crash flash and the ambience.
+## Airline: phase banner, manifest board UI and the end-of-flight payout report (the one end screen).
 
 const PilotPanel := preload("res://scripts/ui/pilot_panel.gd")
 const Ambience := preload("res://scripts/ui/ambience.gd")
@@ -25,6 +25,7 @@ const CHEATS := "[b]CREW CONTROLS[/b]\n" \
 	+ "LMB throw or punch · RMB use item\n" \
 	+ "V camera · MMB ping · T push-to-talk\n" \
 	+ "B seatbelt sign (pilot) · G gear · F flaps\n" \
+	+ "P autopilot (pilot; keeps flying if you leave)\n" \
 	+ "Esc pause"
 
 var world: World
@@ -43,27 +44,26 @@ var _strip: RichTextLabel
 var _pilot: Control
 var _cheats: PanelContainer
 var _pause: Control
-var _results: Control
-var _results_text: RichTextLabel
-var _results_title: Label
 var _flash: ColorRect
 var _ambience: Node
 var _time := 0.0
 var _pause_box: VBoxContainer
 var _settings: SettingsMenu
-var _awards_box: VBoxContainer
 var _fps_label: Label
 
 # --- Airline / Manifest UI ---
 var _phase_banner: PanelContainer
-var _phase_label: Label
+var _phase_label: RichTextLabel
 var _manifest_ui: ColorRect
 var _manifest_cards: VBoxContainer
-var _manifest_totals: Label
+var _manifest_totals: RichTextLabel
 var _manifest_start_btn: Button
+var _manifest_title: Label
 var _payout_report: ColorRect
+var _payout_title: Label
 var _payout_text: RichTextLabel
 var _payout_awards: VBoxContainer
+var _next_btn: Button
 var _manifest_visible := false
 var _payout_visible := false
 
@@ -94,7 +94,6 @@ func _ready() -> void:
 	_flash.color = Color(1, 0.6, 0.2, 0)
 	_root.add_child(_flash)
 	_build_pause()
-	_build_results()
 	_build_fps_counter()
 	_ambience = Ambience.new()
 	_ambience.set("world", world)
@@ -109,17 +108,17 @@ func _ready() -> void:
 	if world.airline != null:
 		world.airline.phase_changed.connect(_on_airline_phase_changed)
 		world.airline.contracts_changed.connect(_refresh_manifest_cards)
-		world.airline.bank_changed.connect(_update_phase_banner)
-		world.airline.flight_no_changed.connect(_update_phase_banner)
+		world.airline.bank_changed.connect(_update_phase_banner.unbind(1))
+		world.airline.flight_no_changed.connect(_update_phase_banner.unbind(1))
 		# Initial update
 		_on_airline_phase_changed(world.airline.phase)
 		_update_phase_banner()
 		_refresh_manifest_cards()
 
 
-## True while the pause menu (incl. settings) or results screen should swallow gameplay input.
+## True while the pause menu (incl. settings), the manifest or the payout report swallows gameplay input.
 func blocking_input() -> bool:
-	return _pause.visible or _results.visible or _manifest_visible or _payout_visible
+	return _pause.visible or _manifest_visible or _payout_visible
 
 
 # --- Airline signal handlers ----------------------------------------------------------------
@@ -133,67 +132,46 @@ func _on_airline_phase_changed(phase: String) -> void:
 	elif phase == "flight":
 		_close_manifest_ui()
 	elif phase == "report":
-		_close_manifest_ui()
-		_show_payout_report()
+		_close_manifest_ui()   # The payout report opens from World.round_ended (it carries the result).
 
 func _update_phase_banner() -> void:
-	if world.airline == null:
-		return
 	var phase: String = world.airline.phase
-	var flight_no: int = world.airline.flight_no
-	var bank: int = world.airline.bank
-	var text: String = ""
+	var head := "[b]FLIGHT DP-%03d[/b]   [color=%s]%s[/color]   Bank: $[b]%d[/b]\n"
+	var text := ""
 	match phase:
 		"manifest":
-			text = "[b]FLIGHT DP-%03d[/b]   [color=#ffd23f]MANIFEST[/color]   Bank: $[b]%d[/b]" % [flight_no, bank]
-			text += "\nChoose contracts. Press [E] on the manifest board to open."
+			text = head % [world.airline.flight_no, "#ffd23f", "MANIFEST", world.airline.bank] \
+				+ "Choose contracts at the manifest board [lb]E] in the front galley."
 		"boarding":
-			var timer := 0
-			if world.airline.has_method("boarding_timer"):
-				timer = int(world.airline.boarding_timer)
-			text = "[b]FLIGHT DP-%03d[/b]   [color=#7fd6ff]BOARDING[/color]   Bank: $[b]%d[/b]" % [flight_no, bank]
-			text += "\nPassengers boarding... Ramp closes in [b]%ds[/b]." % timer
+			text = head % [world.airline.flight_no, "#7fd6ff", "BOARDING", world.airline.bank] \
+				+ "Passengers boarding... Ramp closes in [b]%ds[/b]." % ceili(float(world.airline.boarding_timer))
 		"flight":
-			text = "[b]FLIGHT DP-%03d[/b]   [color=#9dff8a]IN FLIGHT[/color]   Bank: $[b]%d[/b]" % [flight_no, bank]
-			text += "\nServe passengers, protect cargo, survive the weather."
-		"report":
-			text = "[b]FLIGHT DP-%03d[/b]   [color=#ff8fa3]REPORT[/color]   Bank: $[b]%d[/b]" % [flight_no, bank]
-			text += "\nReviewing payout..."
+			text = head % [world.airline.flight_no, "#9dff8a", "IN FLIGHT", world.airline.bank] \
+				+ "Serve passengers, protect cargo, survive the weather."
 		_:
-			text = "[b]FLIGHT DP-%03d[/b]   %s   Bank: $[b]%d[/b]" % [flight_no, phase, bank]
-	_phase_label.text = text
+			text = head % [world.airline.flight_no, "#ff8fa3", "REPORT", world.airline.bank] \
+				+ "Reviewing payout..."
+	if _phase_label.text != text:
+		_phase_label.text = text
 	_phase_banner.visible = true
 
+
 func _refresh_manifest_cards() -> void:
-	if world.airline == null:
-		return
+	_manifest_title.text = "MANIFEST  •  FLIGHT DP-%03d" % world.airline.flight_no
 	for child in _manifest_cards.get_children():
 		child.queue_free()
-	
-	var contracts: Array = world.airline.contracts
-	var pax_total := 0
-	var cargo_total := 0
 	var payout_total := 0
-	
-	for c in contracts:
-		var card := _make_contract_card(c)
-		_manifest_cards.add_child(card)
+	for c: Dictionary in world.airline.contracts:
+		_manifest_cards.add_child(_make_contract_card(c))
 		if c.accepted:
-			if c.type == "passengers":
-				pax_total += c.count
-			else:
-				cargo_total += c.count
-			payout_total += c.payout
-	
-	_manifest_totals.text = "ACCEPTED:  Passengers [b]%d/32[/b]   Cargo [b]%d/10[/b]   Est. Payout: $[b]%d[/b]" % [pax_total, cargo_total, payout_total]
-	
-	var has_pax := false
-	for c in contracts:
-		if c.accepted and c.type == "passengers":
-			has_pax = true
-			break
+			payout_total += int(c.payout)
+	_manifest_totals.text = "ACCEPTED:  Passengers [b]%d/%d[/b]   Cargo [b]%d/%d[/b]   Est. payout: $[b]%d[/b]" % [
+		world.airline.load_of("passengers"), Airline.SEAT_CAPACITY,
+		world.airline.load_of("cargo"), Airline.CARGO_CAPACITY, payout_total]
+	var has_pax: bool = not world.airline.accepted("passengers").is_empty()
 	_manifest_start_btn.disabled = not has_pax
 	_manifest_start_btn.text = "Start Boarding" if has_pax else "Accept at least one passenger contract"
+
 
 # --- Manifest UI builders -------------------------------------------------------------------
 
@@ -202,11 +180,11 @@ func _build_phase_banner() -> void:
 	_phase_banner.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_phase_banner.add_theme_stylebox_override("panel", _round_panel(Color(0.04, 0.06, 0.14, 0.9), Color(1, 0.84, 0.2), 16.0))
 	_place(_phase_banner, Vector2(0.5, 0), Rect2(-400, 16, 800, 0))
-	_phase_label = Label.new()
-	_phase_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_phase_label = _rich(760)
 	_phase_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_phase_label.add_theme_font_size_override("font_size", 20)
-	_phase_label.add_theme_color_override("font_color", Color(1, 0.92, 0.6))
+	_phase_label.add_theme_font_size_override("normal_font_size", 19)
+	_phase_label.add_theme_font_size_override("bold_font_size", 19)
+	_phase_label.add_theme_color_override("default_color", Color(1, 0.92, 0.6))
 	_phase_banner.add_child(_phase_label)
 	_root.add_child(_phase_banner)
 	_phase_banner.visible = false
@@ -232,8 +210,8 @@ func _build_manifest_ui() -> void:
 	vbox.add_theme_constant_override("separation", 12)
 	margin.add_child(vbox)
 	
-	var title := _title("MANIFEST  •  FLIGHT DP-%03d" % (world.airline.flight_no if world.airline else 1), 40, Color(1, 0.84, 0.2))
-	vbox.add_child(title)
+	_manifest_title = _title("MANIFEST", 40, Color(1, 0.84, 0.2))
+	vbox.add_child(_manifest_title)
 	
 	var subtitle := Label.new()
 	subtitle.text = "Toggle contracts to accept/decline. At least one passenger contract required to start."
@@ -251,10 +229,9 @@ func _build_manifest_ui() -> void:
 	_manifest_cards.add_theme_constant_override("separation", 10)
 	scroll.add_child(_manifest_cards)
 	
-	_manifest_totals = Label.new()
+	_manifest_totals = _rich(560)
 	_manifest_totals.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_manifest_totals.add_theme_font_size_override("font_size", 18)
-	_manifest_totals.add_theme_color_override("font_color", Color(1, 0.85, 0.2))
+	_manifest_totals.add_theme_color_override("default_color", Color(1, 0.85, 0.2))
 	vbox.add_child(_manifest_totals)
 	
 	_manifest_start_btn = _button(vbox, "Start Boarding", _on_manifest_confirm)
@@ -281,28 +258,26 @@ func _make_contract_card(contract: Dictionary) -> Control:
 	left.add_theme_constant_override("separation", 4)
 	hbox.add_child(left)
 	
-	var kind_color := Color(0.4, 0.8, 1.0) if contract.type == "passengers" else Color(1.0, 0.7, 0.3)
-	var kind_icon := "👥" if contract.type == "passengers" else "📦"
-	var risk_stars: String = "★".repeat(int(contract.risk)) + "☆".repeat(3 - int(contract.risk))
-	
-	var header := Label.new()
-	header.text = "[color=#%s][b]%s %s[/b][/color]  [color=#aaa]%s[/color]  [color=#ffd23f]%s[/color]" % [
-		kind_color.to_html(false), kind_icon, contract.name, contract.kind, risk_stars
-	]
-	header.add_theme_font_size_override("font_size", 18)
+	var kind_color := "#7fd6ff" if contract.type == "passengers" else "#ffb35c"
+	var risk := int(contract.risk)
+	var header := _rich(440)
+	header.text = "[color=%s][b]%s  %s[/b][/color]   [color=%s]RISK %d/3[/color]" % [
+		kind_color, "PAX" if contract.type == "passengers" else "CARGO", contract.name,
+		["#9dff8a", "#ffd23f", "#ff6b5b"][clampi(risk - 1, 0, 2)], risk]
 	left.add_child(header)
-	
+
 	var blurb := Label.new()
 	blurb.text = contract.blurb
 	blurb.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	blurb.custom_minimum_size.x = 420
+	blurb.custom_minimum_size.x = 440
+	blurb.add_theme_font_size_override("font_size", 16)
 	blurb.add_theme_color_override("font_color", Color(0.8, 0.85, 0.9))
 	left.add_child(blurb)
-	
-	var details := Label.new()
-	details.text = "Count: [b]%d[/b]   Payout: $[b]%d[/b]" % [contract.count, contract.payout]
-	details.add_theme_font_size_override("font_size", 16)
-	details.add_theme_color_override("font_color", Color(0.7, 0.9, 1.0))
+
+	var details := _rich(440)
+	details.add_theme_color_override("default_color", Color(0.7, 0.9, 1.0))
+	details.text = "%s: [b]%d[/b]   Base pay: [color=#9dff8a][b]$%d[/b][/color]" % [
+		"Passengers" if contract.type == "passengers" else "Units", contract.count, contract.payout]
 	left.add_child(details)
 	
 	var right := VBoxContainer.new()
@@ -327,15 +302,13 @@ func _make_contract_card(contract: Dictionary) -> Control:
 	return card
 
 func _toggle_contract(contract_id: int) -> void:
-	if world.airline != null:
-		world.request("manifest_toggle", [contract_id])
+	world.request("manifest_toggle", [contract_id])
 
 func _on_manifest_confirm() -> void:
-	if world.airline != null:
-		world.request("manifest_confirm", [])
+	world.request("manifest_confirm", [])
 
 func _open_manifest_ui() -> void:
-	if _manifest_visible or _payout_visible or _results.visible:
+	if _manifest_visible or _payout_visible:
 		return
 	_manifest_visible = true
 	_manifest_ui.visible = true
@@ -347,7 +320,7 @@ func _close_manifest_ui() -> void:
 		return
 	_manifest_visible = false
 	_manifest_ui.visible = false
-	if not _payout_visible and not _pause.visible and not _results.visible:
+	if not _payout_visible and not _pause.visible:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 func _make_theme() -> Theme:
@@ -545,32 +518,6 @@ func _build_pause() -> void:
 	_pause.add_child(_settings)
 
 
-func _build_results() -> void:
-	_results = _overlay()
-	var panel := PanelContainer.new()
-	panel.add_theme_stylebox_override("panel", _round_panel(Color(0.06, 0.09, 0.22, 0.92), Color(1, 0.84, 0.2)))
-	panel.grow_horizontal = Control.GROW_DIRECTION_BOTH
-	panel.grow_vertical = Control.GROW_DIRECTION_BOTH
-	_place(panel, Vector2(0.5, 0.5), Rect2(0, 0, 0, 0))
-	_results.add_child(panel)
-	var cols := HBoxContainer.new()
-	cols.add_theme_constant_override("separation", 28)
-	panel.add_child(cols)
-	var box := VBoxContainer.new()
-	box.add_theme_constant_override("separation", 10)
-	cols.add_child(box)
-	_results_title = _title("", 64, Color.WHITE)
-	box.add_child(_results_title)
-	_results_text = _rich(460)
-	_results_text.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	box.add_child(_results_text)
-	var leave := _button(box, "Leave flight", _leave)
-	leave.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	_awards_box = VBoxContainer.new()
-	_awards_box.add_theme_constant_override("separation", 8)
-	cols.add_child(_awards_box)
-
-
 func _build_fps_counter() -> void:
 	_fps_label = Label.new()
 	_fps_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
@@ -622,6 +569,8 @@ func _process(dt: float) -> void:
 	_update_subtitles(dt)
 	_update_objective()
 	_strip.text = _strip_text()
+	if world.airline.phase == "boarding":
+		_update_phase_banner()   # Ramp countdown.
 	if _cheats.visible:
 		_cheats.modulate.a = clampf(CHEAT_TIME + 1.0 - _time, 0.0, 1.0)
 		_cheats.visible = _time < CHEAT_TIME + 1.0
@@ -666,7 +615,9 @@ func _strip_text() -> String:
 			var name_text := "LEFT" if i == 0 else "RIGHT"
 			var col := "#ff3b2f" if blink else "#ffb000"
 			lines.append("[color=%s][b]!! %s ENGINE ON FIRE !![/b][/color]" % [col, name_text])
-	if f.phase == FlightModel.Phase.FLYING and not f.has_pilot:
+	if f.autopilot:
+		lines.append("[color=#9dff8a][b]AP ON[/b][/color]  holding cruise to the destination")
+	elif f.phase == FlightModel.Phase.FLYING and not f.has_pilot:
 		lines.append("[color=%s]NOBODY IS FLYING THE PLANE[/color]" % ("#ffd23f" if blink else "#ffffff"))
 	var damage := _damage_text()
 	if damage != "":
@@ -748,10 +699,10 @@ func _input(event: InputEvent) -> void:
 			_resume()
 		elif _manifest_visible:
 			_close_manifest_ui()
-		elif not _results.visible and not _payout_visible:
+		elif not _payout_visible:
 			_open_pause()
 		get_viewport().set_input_as_handled()
-	elif event.is_action_pressed("restart") and _results.visible and multiplayer.is_server():
+	elif event.is_action_pressed("restart") and _payout_visible and multiplayer.is_server():
 		get_viewport().set_input_as_handled()
 		_main().call("restart_round")
 	elif event is InputEventMouseButton and event.pressed and not blocking_input() \
@@ -786,65 +737,7 @@ func _open_settings() -> void:
 	_settings.open()
 
 
-
-
-func _fill_results(r: Dictionary) -> void:
-	var landed: bool = r.get("landed", false)
-	_results_title.text = "LANDED!" if landed else "CRASHED!"
-	_results_title.add_theme_color_override("font_color", Color(0.4, 1, 0.5) if landed else Color(1, 0.4, 0.3))
-	var lines: Array[String] = []
-	if landed:
-		if r.get("on_runway", false):
-			lines.append("On the runway. Textbook. Probably.")
-		else:
-			lines.append("In a field. The cows are furious.")
-		lines.append("Touchdown sink rate: %.1f m/s" % float(r.get("sink", 0.0)))
-	else:
-		lines.append("You %s." % str(r.get("reason", "crashed")))
-	lines.append("")
-	lines.append("[font_size=34][color=#ffd23f][b]SCORE %d[/b][/color][/font_size]" % int(r.get("score", 0)))
-	lines.append("")
-	lines.append("[b]CHAOS REPORT[/b]")
-	var stats: Dictionary = r.get("stats", {})
-	for s in STAT_LABELS:
-		lines.append("%s: [b]%d[/b]" % [s[1], int(stats.get(s[0], 0))])
-	lines.append("[color=#ff8fa3]Chaos score: [b]%d[/b][/color]" % int(r.get("chaos", 0)))
-	lines.append("")
-	if multiplayer.is_server():
-		lines.append("[color=#7fd6ff][b]Host: press [lb]R] to fly again[/b][/color]")
-	else:
-		lines.append("[color=#7fd6ff]Waiting for the host to press [lb]R]...[/color]")
-	_results_text.text = "\n".join(lines)
-	_fill_awards(r.get("awards", []))
-
-
-## One chunky card per crew award (from Scoring.awards via the round result).
-func _fill_awards(awards: Array) -> void:
-	for child in _awards_box.get_children():
-		child.queue_free()
-	_awards_box.visible = not awards.is_empty()
-	if awards.is_empty():
-		return
-	_awards_box.add_child(_title("CREW AWARDS", 30, Color(1, 0.84, 0.2)))
-	var grid := GridContainer.new()
-	grid.columns = 2
-	grid.add_theme_constant_override("h_separation", 10)
-	grid.add_theme_constant_override("v_separation", 10)
-	_awards_box.add_child(grid)
-	for i in awards.size():
-		var a: Dictionary = awards[i]
-		var card := PanelContainer.new()
-		var tint := Color(SPEAKER_COLORS[i % SPEAKER_COLORS.size()])
-		card.add_theme_stylebox_override("panel", _round_panel(Color(0.12, 0.16, 0.34, 0.95), tint, 14.0))
-		var r := _rich(270)
-		r.text = "[font_size=21][color=#%s][b]%s[/b][/color][/font_size]\n[b]%s[/b]  [color=#c8d4ff]%s[/color]" % [
-			tint.to_html(false), str(a.title).replace("[", "[lb]"), str(a.name).replace("[", "[lb]"),
-			str(a.text).replace("[", "[lb]")]
-		card.add_child(r)
-		grid.add_child(card)
-
-
-# --- Payout Report --------------------------------------------------------------------------
+# --- End of flight: the payout report (the only end screen) ---------------------------------
 
 func _build_payout_report() -> void:
 	_payout_report = _overlay()
@@ -855,98 +748,82 @@ func _build_payout_report() -> void:
 	panel.grow_vertical = Control.GROW_DIRECTION_BOTH
 	_place(panel, Vector2(0.5, 0.5), Rect2(0, 0, 0, 0))
 	_payout_report.add_child(panel)
-	
-	var margin := MarginContainer.new()
-	margin.add_theme_constant_override("margin_left", 24)
-	margin.add_theme_constant_override("margin_right", 24)
-	margin.add_theme_constant_override("margin_top", 24)
-	margin.add_theme_constant_override("margin_bottom", 24)
-	panel.add_child(margin)
-	
 	var hbox := HBoxContainer.new()
 	hbox.add_theme_constant_override("separation", 28)
-	margin.add_child(hbox)
-	
+	panel.add_child(hbox)
 	var left := VBoxContainer.new()
 	left.add_theme_constant_override("separation", 10)
 	hbox.add_child(left)
-	
-	_payout_text = _rich(520)
-	_payout_text.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+	_payout_title = _title("", 56, Color.WHITE)
+	left.add_child(_payout_title)
+	_payout_text = _rich(540)
 	_payout_text.add_theme_font_size_override("normal_font_size", 18)
-	_payout_text.add_theme_font_size_override("bold_font_size", 20)
+	_payout_text.add_theme_font_size_override("bold_font_size", 19)
 	left.add_child(_payout_text)
-	
 	var btn_row := HBoxContainer.new()
 	btn_row.add_theme_constant_override("separation", 16)
+	btn_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	left.add_child(btn_row)
-	
-	var next_btn := _button(btn_row, "Next Flight [R]", _on_next_flight)
-	next_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	
-	var leave_btn := _button(btn_row, "Leave", _leave)
-	leave_btn.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-	
+	_next_btn = _button(btn_row, "Next Flight [R]", _on_next_flight)
+	_button(btn_row, "Leave", _leave).custom_minimum_size.x = 160
 	_payout_awards = VBoxContainer.new()
 	_payout_awards.add_theme_constant_override("separation", 8)
 	hbox.add_child(_payout_awards)
-	
-	_payout_report.visible = false
 
-func _show_payout_report() -> void:
-	if _payout_visible or _results.visible:
-		return
-	_payout_visible = true
-	_payout_report.visible = true
-	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 
+## Host: everyone gets the next flight (the World is rebuilt; bank and flight number persist).
 func _on_next_flight() -> void:
 	if multiplayer.is_server():
 		_main().call("restart_round")
-	_payout_visible = false
-	_payout_report.visible = false
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
 
 func _fill_payout_report(r: Dictionary) -> void:
 	var payout: Dictionary = r.get("payout", {})
-	var line_items: Array = payout.get("line_items", [])
-	var total: int = payout.get("total", 0)
-	var new_bank: int = payout.get("new_bank", 0)
-	var tips_total: int = payout.get("tips_total", 0)
-	var penalties_total: int = payout.get("penalties_total", 0)
-	var repair_cost: int = payout.get("repair_cost", 0)
-	
+	var total := int(payout.get("total", 0))
+	var new_bank := int(payout.get("new_bank", 0))
+	var landed: bool = r.get("landed", false)
+	var at_dest: bool = r.get("at_destination", false)
+	_payout_title.text = ("ARRIVED!" if at_dest else "DIVERTED!") if landed else "CRASHED!"
+	_payout_title.add_theme_color_override("font_color",
+		(Color(0.4, 1, 0.5) if at_dest else Color(1, 0.8, 0.3)) if landed else Color(1, 0.4, 0.3))
 	var lines: Array[String] = []
-	lines.append("[b]PAYOUT REPORT[/b]")
-	lines.append("")
-	
-	if line_items.is_empty():
-		lines.append("[i]No contracts accepted.[/i]")
+	lines.append("[center][b]FLIGHT DP-%03d  •  PAYOUT REPORT[/b][/center]" % world.airline.flight_no)
+	if landed:
+		lines.append("[center]%s  Sink rate %.1f m/s.[/center]" % [
+			"On the destination runway. Textbook. Probably." if at_dest else "Not where we were going. The passengers will walk.",
+			float(r.get("sink", 0.0))])
 	else:
-		for item in line_items:
-			var label: String = item.get("label", "")
-			var amount: int = item.get("amount", 0)
-			var color := "#9dff8a" if amount >= 0 else "#ff6b5b"
-			var sign := "+" if amount > 0 else ""
-			lines.append("%s  [color=%s][b]%s%d[/b][/color]" % [label, color, sign, amount])
-	
+		lines.append("[center]You %s.[/center]" % str(r.get("reason", "crashed")).replace("[", "[lb]"))
 	lines.append("")
-	lines.append("[color=#ffd23f][b]TOTAL: %s%d[/b][/color]" % ["+" if total >= 0 else "", total])
+	var items: Array = payout.get("line_items", [])
+	if items.is_empty():
+		lines.append("[i]No contracts accepted.[/i]")
+	for item: Dictionary in items:
+		var amount := int(item.get("amount", 0))
+		lines.append("%s  [color=%s][b]%s$%d[/b][/color]" % [str(item.get("label", "")).replace("[", "[lb]"),
+			"#9dff8a" if amount >= 0 else "#ff6b5b", "+" if amount > 0 else ("-" if amount < 0 else ""), absi(amount)])
 	lines.append("")
-	lines.append("Bank: $[b]%d[/b]  [color=#7fd6ff]→[/color]  New Bank: $[b]%d[/b]" % [new_bank - total, new_bank])
-	
-	if tips_total > 0:
-		lines.append("[color=#ffd23f]Tips earned: +%d[/color]" % tips_total)
-	if penalties_total > 0:
-		lines.append("[color=#ff6b5b]Penalties: -%d[/color]" % penalties_total)
-	if repair_cost > 0:
-		lines.append("[color=#ff8fa3]Repairs: -%d[/color]" % repair_cost)
-	
+	lines.append("[font_size=28][color=#ffd23f][b]TOTAL  %s$%d[/b][/color][/font_size]" % ["+" if total >= 0 else "-", absi(total)])
+	lines.append("Bank: $%d  →  [b]$%d[/b]" % [new_bank - total, new_bank])
+	var stats: Dictionary = r.get("stats", {})
+	var chaos: Array[String] = []
+	for s: Array in STAT_LABELS:
+		if int(stats.get(s[0], 0)) > 0:
+			chaos.append("%s %d" % [s[1], int(stats.get(s[0], 0))])
+	if not chaos.is_empty():
+		lines.append("[color=#ff8fa3]Chaos: %s[/color]" % " · ".join(chaos))
+	lines.append("")
+	var host := multiplayer.is_server()
+	lines.append("[center][color=#7fd6ff]%s[/color][/center]" % ("Press [lb]R] for the next flight." if host \
+		else "Waiting for the host to start the next flight..."))
 	_payout_text.text = "\n".join(lines)
-	
-	_fill_payout_awards(r.get("awards", []))
+	_next_btn.disabled = not host
+	_next_btn.text = "Next Flight [R]" if host else "Waiting for host"
+	_fill_awards(r.get("awards", []))
 
-func _fill_payout_awards(awards: Array) -> void:
+
+## One chunky card per crew award (from Scoring.awards via the round result).
+func _fill_awards(awards: Array) -> void:
 	for child in _payout_awards.get_children():
 		child.queue_free()
 	_payout_awards.visible = not awards.is_empty()
@@ -970,7 +847,7 @@ func _fill_payout_awards(awards: Array) -> void:
 		card.add_child(r)
 		grid.add_child(card)
 
-# Updated round end handler
+
 func _on_round_ended(result: Dictionary) -> void:
 	var landed: bool = result.get("landed", false)
 	if not landed:
@@ -978,12 +855,12 @@ func _on_round_ended(result: Dictionary) -> void:
 		_flash.color = Color(1, 0.65, 0.25, 0.9)
 		var t := create_tween()
 		t.tween_property(_flash, "color:a", 0.0, 1.4).set_ease(Tween.EASE_OUT)
-	_fill_results(result)
-	if result.has("payout"):
-		_fill_payout_report(result)
+	_fill_payout_report(result)
 	await get_tree().create_timer(1.5 if landed else 3.0).timeout
 	if not is_inside_tree():
 		return
 	_pause.visible = false
-	_results.visible = true
+	_close_manifest_ui()
+	_payout_visible = true
+	_payout_report.visible = true
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE

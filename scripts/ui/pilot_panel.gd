@@ -16,7 +16,7 @@ const WARN := Color(1, 0.75, 0.15)
 const BAD := Color(1, 0.3, 0.25)
 const PARTS := [["engine0", "ENG L"], ["engine1", "ENG R"], ["wing0", "WING L"], ["wing1", "WING R"],
 	["tail", "TAIL"], ["hull", "HULL"]]
-const HINT := "W nose down · S nose up · A/D bank · Shift/Ctrl throttle · F flaps · G gear · E leave seat · B seatbelts"
+const HINT := "W nose down · S nose up · A/D bank · Shift/Ctrl throttle · F flaps · G gear · E leave seat · B seatbelts · P autopilot"
 
 var world: World
 var _t := 0.0
@@ -28,10 +28,15 @@ func _process(dt: float) -> void:
 		queue_redraw()
 
 
-## [B] while piloting (the panel is only visible in the pilot seat) toggles the seatbelt sign.
+## [B] / [P] while piloting (the panel is only visible in the pilot seat) toggle the seatbelt
+## sign / the autopilot.
 func _unhandled_input(event: InputEvent) -> void:
-	if visible and world != null and event.is_action_pressed("seatbelt"):
+	if not visible or world == null:
+		return
+	if event.is_action_pressed("seatbelt"):
 		world.request("seatbelt")
+	elif event.is_action_pressed("autopilot"):
+		world.request("autopilot")
 
 
 ## Health 0..1 of a plane part (see Airliner.DAMAGE_PARTS); missing entries count as intact.
@@ -301,6 +306,15 @@ func _navigation(font: Font, r: Rect2, f: FlightModel) -> void:
 	draw_string(font, sb.position + Vector2(0, 31), "ON" if world.seatbelt_sign else "OFF", HORIZONTAL_ALIGNMENT_CENTER,
 		sb.size.x, 15, sb_col)
 	draw_string(font, sb.position + Vector2(0, 42), "[B]", HORIZONTAL_ALIGNMENT_CENTER, sb.size.x, 9, DIM)
+	# Autopilot annunciator in the free corner right of the compass.
+	var ap := Rect2(r.end.x - 44, r.position.y + 22, 44, 44)
+	var ap_col := GOOD if f.autopilot else DIM
+	draw_rect(ap, Color(ap_col, 0.18))
+	draw_rect(ap, ap_col, false, 2.0)
+	draw_string(font, ap.position + Vector2(0, 14), "AP", HORIZONTAL_ALIGNMENT_CENTER, ap.size.x, 10, DIM)
+	draw_string(font, ap.position + Vector2(0, 31), "ON" if f.autopilot else "OFF", HORIZONTAL_ALIGNMENT_CENTER,
+		ap.size.x, 15, ap_col)
+	draw_string(font, ap.position + Vector2(0, 42), "[P]", HORIZONTAL_ALIGNMENT_CENTER, ap.size.x, 9, DIM)
 	# Takeoff roll: ground speed against Vr, under the compass.
 	if f.phase == FlightModel.Phase.PARKED or (f.phase == FlightModel.Phase.ROLLING and f.departure_roll):
 		var rotate := f.speed >= FlightModel.VR
