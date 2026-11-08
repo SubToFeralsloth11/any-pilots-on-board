@@ -25,6 +25,7 @@ static func result(f: FlightModel, s: Dictionary, player_stats := {}, names := {
 			+ int(maxf(0.0, 500.0 - float(td.get("sink", 5.0)) * 100.0)) \
 			- int(s.passengers_lost) * 150 - int(s.windows_broken) * 25
 	return {"landed": landed, "reason": td.get("reason", ""), "on_runway": td.get("on_runway", false),
+		"at_destination": landed and td.get("at_destination", false),
 		"sink": td.get("sink", 0.0), "score": maxi(score, 0), "chaos": chaos, "stats": s.duplicate(),
 		"player_stats": player_stats.duplicate(true), "awards": awards(player_stats, names)}
 
@@ -133,7 +134,7 @@ static func payout(contracts: Array, passenger_report: Dictionary, cargo_report:
 		var base: int = c.payout
 		# Condition multiplier: 0.2 to 1.0
 		var mult: float = lerp(0.2, 1.0, condition)
-		var earned := int(base * mult * (delivered / max(units, 1)))
+		var earned := int(base * mult * (delivered / float(maxi(units, 1))))
 		
 		line_items.append({"label": "%s (%d/%d units, cond %.0f%%)" % [c.name, delivered, units, condition * 100], "amount": earned})
 		total += earned

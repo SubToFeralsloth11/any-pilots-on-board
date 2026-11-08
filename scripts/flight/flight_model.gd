@@ -9,6 +9,9 @@ extends RefCounted
 ## dead engines yaw/roll you toward them, a hurt wing drops, a hurt tail wobbles and
 ## loses elevator authority, hull damage adds drag.
 
+## Host: emitted when the autopilot lets go on its own (near the destination, too low, ...).
+signal autopilot_disengaged(reason: String)
+
 enum Phase { PARKED, FLYING, ROLLING, LANDED, CRASHED }
 
 const GRAVITY := 9.8
@@ -44,10 +47,16 @@ const ROLL_FRICTION := 0.4
 const BRAKE_DECEL := 4.5
 const STEER_RATE := 0.35
 
-## Touchdown limits.
-const MAX_SINK := 5.0
-const MAX_TOUCHDOWN_ROLL := 0.26
-const MIN_TOUCHDOWN_PITCH := -0.1
+## Touchdown limits (forgiving: this is a party game, not a sim).
+const MAX_SINK := 7.5
+const MAX_TOUCHDOWN_ROLL := 0.45
+const MIN_TOUCHDOWN_PITCH := -0.25
+## Landing assist: below FLARE_ALT with the gear down, ground effect bleeds off sink rate toward
+## FLARE_SINK and levels the wings when the pilot isn't banking.
+const FLARE_ALT := 15.0
+const FLARE_SINK := 2.0
+const FLARE_DECEL := 3.0          ## m/s^2 of sink removed at most.
+const FLARE_LEVEL := 0.8          ## rad/s of roll levelling.
 
 ## Takeoff: the departure roll starts once the throttle passes TAKEOFF_THROTTLE; pulling up at
 ## VR or faster lifts off at ROTATE_PITCH. Leaving the runway faster than RUNWAY_EXCURSION_SPEED
@@ -62,12 +71,12 @@ const TAKEOFF_BOUNCE := 30.0
 ## ORIGIN airport, where every round starts parked. Runway along Z; take off heading north (-Z)
 ## from the south (+Z) end.
 const ORIGIN_RUNWAY_CENTER := Vector3(2400, 0, -700)
-const ORIGIN_RUNWAY_HALF := Vector2(35, 800)
+const ORIGIN_RUNWAY_HALF := Vector2(55, 800)
 
 ## DESTINATION airport, ~26 km due north (6-8 minutes of flying). Land heading north (-Z);
 ## the threshold is the south (+Z) end.
 const RUNWAY_CENTER := Vector3(2400, 0, -26000)
-const RUNWAY_HALF := Vector2(35, 800)
+const RUNWAY_HALF := Vector2(55, 800)
 
 ## Parked on the origin runway centreline just inside the south threshold, nose north.
 const START_POS := ORIGIN_RUNWAY_CENTER + Vector3(0, 0, ORIGIN_RUNWAY_HALF.y - 40.0)
@@ -80,6 +89,16 @@ const MOUNTAINS := [
 	[Vector3(6600, 0, -20500), 1600.0, 1250.0],
 	[Vector3(-2600, 0, -24500), 1800.0, 1450.0],
 ]
+
+## Autopilot: cruise and navigation only. It never takes off or lands: it can be engaged only
+## while FLYING above AP_MIN_ALT and further than AP_HANDOFF_DIST from the destination
+## threshold, and lets go on its own when either limit is crossed.
+const AP_CRUISE_ALT := 700.0
+const AP_CRUISE_SPEED := 70.0
+const AP_MIN_ALT := 150.0
+const AP_HANDOFF_DIST := 4000.0
+const AP_MAX_BANK := 0.35
+const AP_MAX_CLIMB := 7.0         ## m/s.
 
 var phase := Phase.PARKED
 var pos := START_POS
@@ -108,6 +127,7 @@ var has_pilot := false
 var pitch_in := 0.0
 var roll_in := 0.0
 var throttle_in := 0.0
+var autopilot := false            ## Host-authoritative; synced in to_array().
 
 var touchdown := {}               ## Filled on touchdown: sink, on_runway, speed, reason, at_destination.
 var departure_roll := false       ## True on the takeoff roll (ROLLING that started from PARKED).
@@ -130,12 +150,17 @@ func step(dt: float) -> void:
 		Phase.PARKED:
 			_parked(dt)
 		Phase.FLYING:
+			if autopilot:
+				_autopilot_inputs()
 			_fly(dt)
 		Phase.ROLLING:
 			_roll_out(dt)
 		_:
 			felt_accel = Vector3(0, -GRAVITY, 0)
 			felt_g = 1.0
+	if autopilot and phase != Phase.FLYING:
+		autopilot = false
+		autopilot_disengaged.emit("wheels on the ground" if phase != Phase.CRASHED else "we crashed")
 	bump = move_toward(bump, 0.0, dt * 1.5)
 
 
@@ -152,6 +177,50 @@ func lift_coefficient(a: float) -> float:
 
 func stall_speed() -> float:
 	return sqrt(GRAVITY / (AERO_K * (CL_MAX + FLAP_CL[flaps])))
+
+
+## Why the autopilot can't be engaged right now ("" = it can, and now is).
+func engage_autopilot() -> String:
+	if phase != Phase.FLYING:
+		return "we need to be airborne first"
+	if altitude() < AP_MIN_ALT:
+		return "climb above %d m first" % int(AP_MIN_ALT)
+	if _to_destination().length() < AP_HANDOFF_DIST:
+		return "too close to the destination, land it yourself"
+	autopilot = true
+	return ""
+
+
+## Horizontal vector from the plane to the destination runway threshold.
+func _to_destination() -> Vector2:
+	var t := runway_threshold()
+	return Vector2(t.x - pos.x, t.z - pos.z)
+
+
+## Writes pitch/roll/throttle inputs that bank gently toward the destination threshold, climb or
+## descend to AP_CRUISE_ALT and hold AP_CRUISE_SPEED. Disengages near the destination or when low.
+func _autopilot_inputs() -> void:
+	var to := _to_destination()
+	if to.length() < AP_HANDOFF_DIST:
+		autopilot = false
+		autopilot_disengaged.emit("%.0f km out, cleared to land" % (to.length() / 1000.0))
+		return
+	if altitude() < AP_MIN_ALT:
+		autopilot = false
+		autopilot_disengaged.emit("below %d m" % int(AP_MIN_ALT))
+		return
+	# Heading: yaw grows to the left; forward = (-sin yaw, -cos yaw). Bank right (+roll) turns right.
+	var heading_err := wrapf(atan2(-to.x, -to.y) - yaw, -PI, PI)
+	var want_roll := clampf(-heading_err * 1.2, -AP_MAX_BANK, AP_MAX_BANK)
+	roll_in = clampf((want_roll - roll) * 2.5 - roll_rate * 0.8, -1.0, 1.0)
+	# Altitude -> climb rate -> flight path angle -> pitch attitude (plus the trim angle of attack).
+	var want_vs := clampf((AP_CRUISE_ALT - pos.y) * 0.08, -AP_MAX_CLIMB, AP_MAX_CLIMB)
+	var gamma := asin(clampf(want_vs / maxf(speed, 30.0), -0.5, 0.5))
+	var vs_err := want_vs - velocity.y
+	var want_pitch := clampf(gamma + alpha + vs_err * 0.01, -0.2, 0.3)
+	pitch_in = clampf((want_pitch - pitch) * 3.0 - pitch_rate * 1.0, -1.0, 1.0)
+	throttle_in = clampf((AP_CRUISE_SPEED - speed) * 0.25, -1.0, 1.0)
+
 
 ## On the ground before takeoff: engines idle, no movement. Throttle is still live so the pilot
 ## can spool up; once it passes TAKEOFF_THROTTLE (and the parking brake is off) the departure
@@ -188,7 +257,7 @@ func _fly(dt: float) -> void:
 	var authority := clampf(speed / 55.0, 0.15, 1.2)
 	var p_cmd := 0.0
 	var r_cmd := 0.0
-	if has_pilot:
+	if has_pilot or autopilot:
 		p_cmd = pitch_in * PITCH_RATE
 		r_cmd = roll_in * ROLL_RATE
 	else:
@@ -230,6 +299,10 @@ func _fly(dt: float) -> void:
 	var accel := lift_dir * q * cl - vdir * q * cd + fwd * (t_l + t_r) * THRUST_PER_ENGINE + side
 	accel.y -= GRAVITY + bump * GRAVITY * 0.3
 	velocity += accel * dt
+	if gear_down and has_pilot and pos.y < FLARE_ALT and velocity.y < -FLARE_SINK:
+		velocity.y = minf(velocity.y + FLARE_DECEL * dt, -FLARE_SINK)
+	if gear_down and has_pilot and pos.y < FLARE_ALT and is_zero_approx(roll_in):
+		roll = move_toward(roll, 0.0, FLARE_LEVEL * dt)
 	speed = velocity.length()
 	pos += velocity * dt
 	_update_felt(accel, b)
@@ -386,7 +459,7 @@ func to_array() -> PackedFloat32Array:
 		1.0 if gear_down else 0.0, phase, felt_accel.x, felt_accel.y, felt_accel.z, felt_g,
 		engine_power[0], engine_power[1], velocity.x, velocity.y, velocity.z,
 		1.0 if has_pilot else 0.0, flaps, alpha, 1.0 if stalled else 0.0,
-		1.0 if departure_roll else 0.0])
+		1.0 if departure_roll else 0.0, 1.0 if autopilot else 0.0])
 
 func from_array(a: PackedFloat32Array) -> void:
 	pos = Vector3(a[0], a[1], a[2])
@@ -406,3 +479,4 @@ func from_array(a: PackedFloat32Array) -> void:
 	alpha = a[21]
 	stalled = a[22] > 0.5
 	departure_roll = a[23] > 0.5
+	autopilot = a[24] > 0.5

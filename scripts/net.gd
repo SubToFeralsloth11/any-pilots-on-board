@@ -12,6 +12,10 @@ var local_name := "Passenger"
 
 
 func host(port := PORT) -> Error:
+	# A browser can't open a port, so the web build flies solo on an offline peer (still the host).
+	if OS.has_feature("web"):
+		multiplayer.multiplayer_peer = OfflineMultiplayerPeer.new()
+		return OK
 	var peer := ENetMultiplayerPeer.new()
 	var err := peer.create_server(port, MAX_CLIENTS)
 	if err != OK:
